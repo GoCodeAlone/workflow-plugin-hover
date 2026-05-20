@@ -15,7 +15,8 @@
 3. GET `/signin/totp` to probe for MFA:
    - If the page contains a `_token`: account has MFA enabled → POST `/signin/totp`
      with `code` (RFC 6238 TOTP) + `_token`.
-   - If no `_token`: MFA is disabled → skip step 3.
+   - If no `_token`: MFA is disabled → skip the TOTP submission (the
+     GET probe itself still runs).
 4. Session cookies are stored in-memory for subsequent `/api/dns*` calls.
 
 Re-auth fires whenever the in-memory session is older than 1 hour.

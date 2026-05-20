@@ -112,7 +112,13 @@ func (p *HoverProvider) Plan(ctx context.Context, desired []interfaces.ResourceS
 	return &plan, err
 }
 
-// Destroy removes DNS records for the given refs.
+// Destroy invokes the per-resource driver Delete for each ref.
+// For infra.dns this is a no-op: Hover exposes no API to delete a
+// DNS zone (only individual records). The resource is marked
+// "destroyed" in IaC state because workflow has nothing further to
+// reconcile, but the upstream records remain in Hover. Operators
+// who want to drop all records must do so manually via the Hover
+// control panel.
 func (p *HoverProvider) Destroy(ctx context.Context, resources []interfaces.ResourceRef) (*interfaces.DestroyResult, error) {
 	result := &interfaces.DestroyResult{}
 	for _, ref := range resources {

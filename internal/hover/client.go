@@ -140,8 +140,13 @@ func (c *Client) fetchSignInCSRF(ctx context.Context) (string, error) {
 
 // probeTOTPPage fetches /signin/totp and returns:
 //   - (token, true, nil)  — page contains a _token → MFA is enabled.
-//   - ("", false, nil)    — no _token found → MFA is not enabled; skip TOTP.
-//   - ("", false, err)    — network or parse error.
+//   - ("", false, nil)    — page loaded but no _token → MFA is not enabled.
+//   - ("", false, err)    — network error, non-2xx status, or body read failure.
+//
+// Treating a non-200 response (redirect, login failure, Cloudflare gate)
+// as "MFA not enabled" would silently misclassify these errors and let
+// login appear to succeed before failing on the first API call. Status
+// + body errors are now surfaced rather than swallowed.
 func (c *Client) probeTOTPPage(ctx context.Context) (string, bool, error) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, hoverHost+"/signin/totp", nil)
 	req.Header.Set("User-Agent", c.UserAgent)
@@ -150,10 +155,17 @@ func (c *Client) probeTOTPPage(ctx context.Context) (string, bool, error) {
 		return "", false, fmt.Errorf("hover: probe TOTP page: %w", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", false, fmt.Errorf("hover: probe TOTP page: unexpected HTTP %d", resp.StatusCode)
+	}
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if readErr != nil {
+		return "", false, fmt.Errorf("hover: probe TOTP page: read body: %w", readErr)
+	}
 	m := csrfRe.FindSubmatch(body)
 	if len(m) < 2 {
-		// No CSRF token on the page — MFA is not enabled on this account.
+		// Page loaded successfully but no CSRF token present —
+		// account does not have MFA enabled.
 		return "", false, nil
 	}
 	return string(m[1]), true, nil
@@ -208,6 +220,40 @@ type Domain struct {
 	ID      string      `json:"id"`
 	Name    string      `json:"domain_name"`
 	Records []DNSRecord `json:"entries"`
+}
+
+// GetDomain returns the full Domain struct (including the
+// hover-assigned ID) for the named zone. The ID is required when
+// creating new records via CreateRecord; the human-readable name is
+// not accepted by the POST /api/dns endpoint.
+func (c *Client) GetDomain(ctx context.Context, domain string) (*Domain, error) {
+	if err := c.ensureLogin(ctx); err != nil {
+		return nil, err
+	}
+	endpoint := fmt.Sprintf("%s/api/domains/%s/dns", hoverHost, url.PathEscape(domain))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req.Header.Set("User-Agent", c.UserAgent)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("hover get domain %q: HTTP %d: %s", domain, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var wrap struct {
+		Domains []Domain `json:"domains"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&wrap); err != nil {
+		return nil, fmt.Errorf("hover get domain parse: %w", err)
+	}
+	for i := range wrap.Domains {
+		if strings.EqualFold(wrap.Domains[i].Name, domain) {
+			return &wrap.Domains[i], nil
+		}
+	}
+	return nil, fmt.Errorf("hover: domain %q not found in account", domain)
 }
 
 // ListRecords returns records for the named zone. Caller MUST pass

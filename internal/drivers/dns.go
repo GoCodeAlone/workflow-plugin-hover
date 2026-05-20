@@ -26,6 +26,7 @@ import (
 
 // HoverDNSClient is the subset of hover.Client used by DNSDriver (injectable for tests).
 type HoverDNSClient interface {
+	GetDomain(ctx context.Context, domain string) (*hover.Domain, error)
 	ListRecords(ctx context.Context, domain string) ([]hover.DNSRecord, error)
 	CreateRecord(ctx context.Context, domainID string, rec hover.DNSRecord) (*hover.DNSRecord, error)
 	UpdateRecord(ctx context.Context, recordID string, rec hover.DNSRecord) error
@@ -148,7 +149,14 @@ func (d *DNSDriver) Diff(_ context.Context, desired interfaces.ResourceSpec, cur
 		if len(candidates) == 0 {
 			return &interfaces.DiffResult{NeedsUpdate: true}, nil
 		}
-		if candidates[0].Content != dr.Content {
+		cur := candidates[0]
+		if cur.Content != dr.Content {
+			return &interfaces.DiffResult{NeedsUpdate: true}, nil
+		}
+		// TTL is part of the record's effective state. Only consider it
+		// when the desired record specifies one (TTL == 0 means "leave
+		// the existing TTL alone" per upsertRecords' update guard).
+		if dr.TTL != 0 && cur.TTL != dr.TTL {
 			return &interfaces.DiffResult{NeedsUpdate: true}, nil
 		}
 		currentByKey[key] = candidates[1:]
@@ -191,13 +199,18 @@ func (d *DNSDriver) upsertRecords(ctx context.Context, domain string, desired []
 	if len(desired) == 0 {
 		return nil
 	}
-	existing, err := d.client.ListRecords(ctx, domain)
+
+	// Hover's POST /api/dns endpoint requires `domain_id` (hover-assigned
+	// numeric ID), NOT the apex name. Resolve the domain up front via
+	// GetDomain, which returns both the ID and the current record set;
+	// reuse the embedded record set to avoid a second ListRecords round trip.
+	dom, err := d.client.GetDomain(ctx, domain)
 	if err != nil {
-		return fmt.Errorf("hover dns list records %q: %w", domain, err)
+		return fmt.Errorf("hover dns resolve domain %q: %w", domain, err)
 	}
 
 	existingByKey := make(map[string][]hover.DNSRecord)
-	for _, r := range existing {
+	for _, r := range dom.Records {
 		key := recordKey(r.Type, r.Name)
 		existingByKey[key] = append(existingByKey[key], r)
 	}
@@ -215,7 +228,7 @@ func (d *DNSDriver) upsertRecords(ctx context.Context, domain string, desired []
 				return fmt.Errorf("hover dns update %s/%s %q: %w", dr.Type, dr.Name, domain, err)
 			}
 		} else {
-			created, err := d.client.CreateRecord(ctx, domain, dr)
+			created, err := d.client.CreateRecord(ctx, dom.ID, dr)
 			if err != nil {
 				return fmt.Errorf("hover dns create %s/%s %q: %w", dr.Type, dr.Name, domain, err)
 			}
@@ -366,7 +379,7 @@ func dnsRecordsFromOutput(out *interfaces.ResourceOutput) ([]hover.DNSRecord, er
 		return nil, fmt.Errorf("hover dns: outputs.records: %w", err)
 	}
 	recs := make([]hover.DNSRecord, 0, len(items))
-	for i, m := range items {
+	for _, m := range items {
 		typ, _ := m["type"].(string)
 		name, _ := m["name"].(string)
 		content, _ := m["content"].(string)
@@ -375,7 +388,6 @@ func dnsRecordsFromOutput(out *interfaces.ResourceOutput) ([]hover.DNSRecord, er
 		if typ == "" || name == "" {
 			continue
 		}
-		_ = i
 		recs = append(recs, hover.DNSRecord{
 			ID:      id,
 			Type:    typ,

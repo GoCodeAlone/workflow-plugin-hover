@@ -5,7 +5,8 @@ import (
 	sdk "github.com/GoCodeAlone/workflow/plugin/external/sdk"
 )
 
-// Serve starts the Hover IaC plugin gRPC server. Called from cmd/main.go.
+// Serve starts the Hover IaC plugin gRPC server. Called from
+// cmd/workflow-plugin-hover/main.go.
 // The SDK auto-registers every typed pb.IaCProvider*Server interface that
 // *hoverIaCServer satisfies via Go type-assertion at plugin startup.
 func Serve() {

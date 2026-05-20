@@ -12,12 +12,28 @@ import (
 
 // fakeClient is a test double for HoverDNSClient.
 type fakeClient struct {
+	domainID  string // hover-assigned domain ID returned by GetDomain
 	records   []hover.DNSRecord
 	createErr error
 	updateErr error
 	deleteErr error
 	listErr   error
 	nextID    int
+
+	lastCreateDomainID string // captured for assertions
+}
+
+func (f *fakeClient) GetDomain(_ context.Context, domain string) (*hover.Domain, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	id := f.domainID
+	if id == "" {
+		id = "dom1"
+	}
+	recs := make([]hover.DNSRecord, len(f.records))
+	copy(recs, f.records)
+	return &hover.Domain{ID: id, Name: domain, Records: recs}, nil
 }
 
 func (f *fakeClient) ListRecords(_ context.Context, _ string) ([]hover.DNSRecord, error) {
@@ -29,10 +45,11 @@ func (f *fakeClient) ListRecords(_ context.Context, _ string) ([]hover.DNSRecord
 	return out, nil
 }
 
-func (f *fakeClient) CreateRecord(_ context.Context, _ string, rec hover.DNSRecord) (*hover.DNSRecord, error) {
+func (f *fakeClient) CreateRecord(_ context.Context, domainID string, rec hover.DNSRecord) (*hover.DNSRecord, error) {
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
+	f.lastCreateDomainID = domainID
 	f.nextID++
 	rec.ID = fmt.Sprintf("dns%d", f.nextID)
 	f.records = append(f.records, rec)
@@ -322,5 +339,67 @@ func TestDNSOutput_Structpb(t *testing.T) {
 	}
 	if entry["type"] != "A" || entry["name"] != "@" || entry["content"] != "1.2.3.4" {
 		t.Errorf("unexpected record entry: %v", entry)
+	}
+}
+
+// TestUpsertRecords_UsesDomainIDNotName regresses a bug where Create
+// was passing the apex domain name into the Hover POST /api/dns
+// `domain_id` form field, which Hover rejects (it requires the
+// numeric hover-assigned ID). After the fix, upsertRecords resolves
+// the domain ID via GetDomain and passes it to CreateRecord.
+func TestUpsertRecords_UsesDomainIDNotName(t *testing.T) {
+	fc := &fakeClient{
+		domainID: "1234567",
+		records:  nil, // empty → upsertRecords will Create
+	}
+	d := NewDNSDriverWithClient(fc)
+	spec := interfaces.ResourceSpec{
+		Name: "example.com",
+		Type: "infra.dns",
+		Config: map[string]any{
+			"domain": "example.com",
+			"records": []any{
+				map[string]any{"type": "A", "name": "@", "content": "1.2.3.4", "ttl": 1800},
+			},
+		},
+	}
+	if _, err := d.Create(context.Background(), spec); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if fc.lastCreateDomainID != "1234567" {
+		t.Fatalf("CreateRecord called with domain_id=%q, want %q (hover-assigned numeric ID)",
+			fc.lastCreateDomainID, "1234567")
+	}
+}
+
+// TestDiff_TTLChange_DetectedAsUpdate regresses a bug where Diff
+// compared only Content, missing TTL changes — Update would never
+// fire even though upsertRecords would have applied a new TTL.
+func TestDiff_TTLChange_DetectedAsUpdate(t *testing.T) {
+	current := &interfaces.ResourceOutput{
+		ProviderID: "example.com",
+		Outputs: map[string]any{
+			"records": []any{
+				map[string]any{"type": "A", "name": "@", "content": "1.2.3.4", "ttl": float64(1800), "id": "dns1"},
+			},
+		},
+	}
+	spec := interfaces.ResourceSpec{
+		Name: "example.com",
+		Type: "infra.dns",
+		Config: map[string]any{
+			"domain": "example.com",
+			"records": []any{
+				map[string]any{"type": "A", "name": "@", "content": "1.2.3.4", "ttl": 3600},
+			},
+		},
+	}
+	d := NewDNSDriverWithClient(&fakeClient{})
+	res, err := d.Diff(context.Background(), spec, current)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	if !res.NeedsUpdate {
+		t.Fatal("expected NeedsUpdate=true for TTL change")
 	}
 }
