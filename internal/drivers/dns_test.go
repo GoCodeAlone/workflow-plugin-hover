@@ -403,3 +403,75 @@ func TestDiff_TTLChange_DetectedAsUpdate(t *testing.T) {
 		t.Fatal("expected NeedsUpdate=true for TTL change")
 	}
 }
+
+// TestDiff_MultipleARecords_OrderingDoesNotMatter regresses a bug where
+// Diff matched candidates[0] only and could falsely report NeedsUpdate
+// when multiple records share the same (type, name) but appear in a
+// different order between current and desired.
+func TestDiff_MultipleARecords_OrderingDoesNotMatter(t *testing.T) {
+	d, _ := newDriver()
+	spec := interfaces.ResourceSpec{
+		Name: "example.com", Type: "infra.dns",
+		Config: map[string]any{
+			"records": []any{
+				map[string]any{"type": "A", "name": "@", "content": "1.1.1.1"},
+				map[string]any{"type": "A", "name": "@", "content": "2.2.2.2"},
+			},
+		},
+	}
+	// Current returns the same set but in reverse order.
+	current := &interfaces.ResourceOutput{
+		ProviderID: "example.com",
+		Outputs: map[string]any{
+			"records": []any{
+				map[string]any{"id": "r2", "type": "A", "name": "@", "content": "2.2.2.2"},
+				map[string]any{"id": "r1", "type": "A", "name": "@", "content": "1.1.1.1"},
+			},
+		},
+	}
+	diff, err := d.Diff(context.Background(), spec, current)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	if diff.NeedsUpdate {
+		t.Error("expected NeedsUpdate=false for same multiset of records (order-independent)")
+	}
+}
+
+func TestRecordFromMap_InvalidTTL_Rejected(t *testing.T) {
+	// Negative TTL must surface as a typed error rather than coerce to 0.
+	_, err := recordFromMap(0, map[string]any{
+		"type":    "A",
+		"name":    "@",
+		"content": "1.2.3.4",
+		"ttl":     -1,
+	})
+	if err == nil {
+		t.Fatal("expected error for negative TTL")
+	}
+}
+
+func TestRecordFromMap_NonIntegralTTL_Rejected(t *testing.T) {
+	// Floats that aren't whole numbers (e.g., 300.5) must error.
+	_, err := recordFromMap(0, map[string]any{
+		"type":    "A",
+		"name":    "@",
+		"content": "1.2.3.4",
+		"ttl":     300.5,
+	})
+	if err == nil {
+		t.Fatal("expected error for non-integral float TTL")
+	}
+}
+
+func TestRecordFromMap_StringTTL_Rejected(t *testing.T) {
+	_, err := recordFromMap(0, map[string]any{
+		"type":    "A",
+		"name":    "@",
+		"content": "1.2.3.4",
+		"ttl":     "300",
+	})
+	if err == nil {
+		t.Fatal("expected error for string TTL")
+	}
+}

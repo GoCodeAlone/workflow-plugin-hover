@@ -136,7 +136,12 @@ func (d *DNSDriver) Diff(_ context.Context, desired interfaces.ResourceSpec, cur
 		return nil, err
 	}
 
-	// Index current records by (type, name) for O(1) lookup.
+	// Index current records by (type, name) for O(1) lookup. Multiple
+	// records sharing the same (type, name) — e.g., several A or
+	// AAAA records on the apex — are accumulated in the candidate
+	// slice and matched against desired records by exact Content
+	// (and TTL when specified) rather than by slice position. Each
+	// match consumes one candidate to preserve multiset semantics.
 	currentByKey := make(map[string][]hover.DNSRecord)
 	for _, r := range currentRecs {
 		key := recordKey(r.Type, r.Name)
@@ -146,20 +151,26 @@ func (d *DNSDriver) Diff(_ context.Context, desired interfaces.ResourceSpec, cur
 	for _, dr := range desiredRecs {
 		key := recordKey(dr.Type, dr.Name)
 		candidates := currentByKey[key]
-		if len(candidates) == 0 {
+		idx := -1
+		for i, cur := range candidates {
+			if cur.Content != dr.Content {
+				continue
+			}
+			// TTL is part of the record's effective state. Only consider
+			// it when the desired record specifies one (TTL == 0 means
+			// "leave the existing TTL alone" per upsertRecords).
+			if dr.TTL != 0 && cur.TTL != dr.TTL {
+				continue
+			}
+			idx = i
+			break
+		}
+		if idx < 0 {
 			return &interfaces.DiffResult{NeedsUpdate: true}, nil
 		}
-		cur := candidates[0]
-		if cur.Content != dr.Content {
-			return &interfaces.DiffResult{NeedsUpdate: true}, nil
-		}
-		// TTL is part of the record's effective state. Only consider it
-		// when the desired record specifies one (TTL == 0 means "leave
-		// the existing TTL alone" per upsertRecords' update guard).
-		if dr.TTL != 0 && cur.TTL != dr.TTL {
-			return &interfaces.DiffResult{NeedsUpdate: true}, nil
-		}
-		currentByKey[key] = candidates[1:]
+		// Remove the matched candidate so subsequent desired records
+		// can't re-match it.
+		currentByKey[key] = append(candidates[:idx], candidates[idx+1:]...)
 	}
 	return &interfaces.DiffResult{NeedsUpdate: false}, nil
 }
@@ -323,7 +334,10 @@ func recordFromMap(index int, m map[string]any) (hover.DNSRecord, error) {
 	if err != nil {
 		return hover.DNSRecord{}, err
 	}
-	ttl, _ := optionalInt(m, "ttl")
+	ttl, err := optionalNonNegativeInt(m, "ttl", index)
+	if err != nil {
+		return hover.DNSRecord{}, err
+	}
 	return hover.DNSRecord{
 		Type:    strings.ToUpper(typ),
 		Name:    name,
@@ -358,6 +372,37 @@ func optionalInt(m map[string]any, key string) (int, bool) {
 		return int(n), true
 	}
 	return 0, false
+}
+
+// optionalNonNegativeInt is like optionalInt but rejects values that
+// are present but the wrong type or negative, returning a typed error
+// instead of silently coercing to 0. Used for record TTL where a
+// silent 0 would skip the field in upsertRecords AND mask user typos.
+func optionalNonNegativeInt(m map[string]any, key string, index int) (int, error) {
+	v, ok := m[key]
+	if !ok {
+		return 0, nil
+	}
+	var n int
+	switch t := v.(type) {
+	case int:
+		n = t
+	case int64:
+		n = int(t)
+	case float64:
+		// Reject non-integral floats (e.g. 1800.5) — Hover's TTL is
+		// integer seconds.
+		if t != float64(int64(t)) {
+			return 0, fmt.Errorf("hover dns: records[%d].%s = %v must be a non-negative integer", index, key, t)
+		}
+		n = int(t)
+	default:
+		return 0, fmt.Errorf("hover dns: records[%d].%s = %v (%T) must be a non-negative integer", index, key, v, v)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("hover dns: records[%d].%s = %d must be a non-negative integer", index, key, n)
+	}
+	return n, nil
 }
 
 func recordKey(typ, name string) string {
