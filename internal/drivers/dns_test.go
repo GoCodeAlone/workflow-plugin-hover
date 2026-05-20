@@ -92,14 +92,25 @@ func newDriver(records ...hover.DNSRecord) (*DNSDriver, *fakeClient) {
 }
 
 func TestDNSDriver_Create_Empty(t *testing.T) {
+	// Explicitly-empty records list is the supported way to declare
+	// "no DNS records on this zone". A missing records key is now an
+	// error (would otherwise silently prune everything upstream).
 	d, _ := newDriver()
-	spec := interfaces.ResourceSpec{Name: "example.com", Type: "infra.dns", Config: map[string]any{}}
+	spec := interfaces.ResourceSpec{Name: "example.com", Type: "infra.dns", Config: map[string]any{"records": []any{}}}
 	out, err := d.Create(context.Background(), spec)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	if out.ProviderID != "example.com" {
 		t.Errorf("ProviderID = %q want %q", out.ProviderID, "example.com")
+	}
+}
+
+func TestDNSDriver_Create_MissingRecordsKey_Rejected(t *testing.T) {
+	d, _ := newDriver()
+	spec := interfaces.ResourceSpec{Name: "example.com", Type: "infra.dns", Config: map[string]any{}}
+	if _, err := d.Create(context.Background(), spec); err == nil {
+		t.Fatal("expected error for missing config.records key")
 	}
 }
 
@@ -148,14 +159,25 @@ func TestDNSDriver_Create_UpdatesExistingRecord(t *testing.T) {
 }
 
 func TestDNSDriver_Diff_NilCurrent(t *testing.T) {
+	// Diff now validates config.records up front so config errors
+	// surface at Plan time even for new resources. Use an explicit
+	// empty records list to exercise the nil-current early-return path.
 	d, _ := newDriver()
-	spec := interfaces.ResourceSpec{Name: "example.com", Type: "infra.dns", Config: map[string]any{}}
+	spec := interfaces.ResourceSpec{Name: "example.com", Type: "infra.dns", Config: map[string]any{"records": []any{}}}
 	diff, err := d.Diff(context.Background(), spec, nil)
 	if err != nil {
 		t.Fatalf("Diff: %v", err)
 	}
 	if !diff.NeedsUpdate {
 		t.Error("expected NeedsUpdate=true for nil current")
+	}
+}
+
+func TestDNSDriver_Diff_MissingRecordsKey_ErrorsAtPlanTime(t *testing.T) {
+	d, _ := newDriver()
+	spec := interfaces.ResourceSpec{Name: "example.com", Type: "infra.dns", Config: map[string]any{}}
+	if _, err := d.Diff(context.Background(), spec, nil); err == nil {
+		t.Fatal("expected error for missing config.records at Plan time")
 	}
 }
 
@@ -218,7 +240,7 @@ func TestDNSDriver_Diff_DomainChange_ForceReplace(t *testing.T) {
 	spec := interfaces.ResourceSpec{
 		Name:   "new.com",
 		Type:   "infra.dns",
-		Config: map[string]any{"domain": "new.com"},
+		Config: map[string]any{"domain": "new.com", "records": []any{}},
 	}
 	current := &interfaces.ResourceOutput{ProviderID: "old.com"}
 	diff, err := d.Diff(context.Background(), spec, current)
@@ -246,7 +268,7 @@ func TestDNSDriver_Update_DomainRenameRejected(t *testing.T) {
 	d, _ := newDriver()
 	spec := interfaces.ResourceSpec{
 		Name: "new.com", Type: "infra.dns",
-		Config: map[string]any{"domain": "new.com"},
+		Config: map[string]any{"domain": "new.com", "records": []any{}},
 	}
 	ref := interfaces.ResourceRef{Name: "old.com", ProviderID: "old.com"}
 	_, err := d.Update(context.Background(), ref, spec)
@@ -529,5 +551,69 @@ func TestDiff_EmptyDesired_WithCurrentRecords_NeedsUpdate(t *testing.T) {
 	}
 	if !diff.NeedsUpdate {
 		t.Error("expected NeedsUpdate=true when desired is empty but current has records")
+	}
+}
+
+// TestUpsertRecords_PrunesExtraRecords verifies that records in the
+// upstream zone that don't appear in the desired config are deleted
+// during apply. Regresses the "no prune on apply" gap that left
+// removed records as orphans upstream.
+func TestUpsertRecords_PrunesExtraRecords(t *testing.T) {
+	fc := &fakeClient{
+		records: []hover.DNSRecord{
+			{ID: "r1", Type: "A", Name: "@", Content: "1.1.1.1"},
+			{ID: "r2", Type: "A", Name: "www", Content: "1.1.1.1"}, // orphan
+		},
+	}
+	d := NewDNSDriverWithClient(fc)
+	spec := interfaces.ResourceSpec{
+		Name: "example.com", Type: "infra.dns",
+		Config: map[string]any{
+			"records": []any{
+				map[string]any{"type": "A", "name": "@", "content": "1.1.1.1"},
+			},
+		},
+	}
+	if _, err := d.Update(context.Background(), interfaces.ResourceRef{Name: "example.com", ProviderID: "example.com"}, spec); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if len(fc.records) != 1 {
+		t.Fatalf("expected upstream to converge to 1 record after prune; got %d: %+v", len(fc.records), fc.records)
+	}
+	if fc.records[0].Name != "@" {
+		t.Errorf("expected the apex record to remain; got %+v", fc.records[0])
+	}
+}
+
+func TestUpsertRecords_EmptyDesiredDeletesAll(t *testing.T) {
+	fc := &fakeClient{
+		records: []hover.DNSRecord{
+			{ID: "r1", Type: "A", Name: "@", Content: "1.1.1.1"},
+			{ID: "r2", Type: "A", Name: "www", Content: "1.1.1.1"},
+		},
+	}
+	d := NewDNSDriverWithClient(fc)
+	spec := interfaces.ResourceSpec{
+		Name: "example.com", Type: "infra.dns",
+		Config: map[string]any{"records": []any{}},
+	}
+	if _, err := d.Update(context.Background(), interfaces.ResourceRef{Name: "example.com", ProviderID: "example.com"}, spec); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if len(fc.records) != 0 {
+		t.Errorf("expected all upstream records pruned; got %d: %+v", len(fc.records), fc.records)
+	}
+}
+
+func TestDNSDriver_Diff_MissingDomain_ErrorsAtPlanTime(t *testing.T) {
+	// No name + no config.domain → domainFromSpec returns error.
+	// Diff must surface that before short-circuiting on nil current.
+	d, _ := newDriver()
+	spec := interfaces.ResourceSpec{
+		Type:   "infra.dns",
+		Config: map[string]any{"records": []any{}},
+	}
+	if _, err := d.Diff(context.Background(), spec, nil); err == nil {
+		t.Fatal("expected error for missing domain at Plan time")
 	}
 }

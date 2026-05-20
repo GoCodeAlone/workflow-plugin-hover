@@ -43,6 +43,15 @@ resources:
         - { type: CNAME, name: 'www', content: example.com.,  ttl: 900 }
 ```
 
+The `records` key is **required**. The plugin treats your declared
+list as authoritative: on apply, records present upstream but
+absent from `records` are deleted, records present in `records`
+but absent upstream are created, and records that differ are
+updated. To deliberately drop every record from a zone, set
+`records: []` — that explicit empty list is the only way to ask
+for a wipe. Omitting `records` entirely is rejected at Plan time
+to avoid the "I forgot the key and lost my zone" failure mode.
+
 ## Required secrets
 
 | Name | Sensitive | Source |
@@ -74,15 +83,10 @@ against [RFC 6238 Appendix B vectors](https://datatracker.ietf.org/doc/html/rfc6
 
 ## Limitations
 
-- **No prune on apply**: `upsertRecords` only adds/updates. Records
-  that exist upstream but are not in the desired config are NOT
-  deleted on `apply`. `Diff` does flag them (so Plan reports drift),
-  but converging the actual record set requires manually deleting
-  the orphan records via Hover's UI or via a future explicit prune
-  path. Track follow-up via the project issue list.
 - **No zone delete**: Hover exposes no API to drop a DNS zone.
   Resource `Delete` is a no-op — the IaC state is cleared but
-  upstream records remain.
+  upstream records remain. Operators who want to drop the zone
+  must do so manually via Hover's UI.
 
 ## Development
 

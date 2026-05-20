@@ -1,0 +1,46 @@
+version: 2
+
+project_name: workflow-plugin-hover
+
+before:
+  hooks:
+    - "sh -c \"rm -rf .release && mkdir -p .release && jq --arg v '{{ .Version }}' '.version = $v' plugin.json > .release/plugin.json\""
+    - "sh -c \"jq -e --arg v '{{ .Version }}' '.version == $v' .release/plugin.json > /dev/null || (echo 'plugin.json version rewrite failed' >&2 && exit 1)\""
+
+builds:
+  - id: workflow-plugin-hover
+    main: ./cmd/workflow-plugin-hover
+    binary: workflow-plugin-hover
+    env:
+      - CGO_ENABLED=0
+      - GOPRIVATE=github.com/GoCodeAlone/*
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X github.com/GoCodeAlone/workflow-plugin-hover/internal.Version={{.Version}}
+
+archives:
+  - id: workflow-plugin-hover
+    ids:
+      - workflow-plugin-hover
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}-{{ .Os }}-{{ .Arch }}"
+    files:
+      - src: .release/plugin.json
+        dst: plugin.json
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+
+release:
+  github:
+    owner: GoCodeAlone
+    name: workflow-plugin-hover
+  draft: true
