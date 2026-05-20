@@ -61,6 +61,22 @@ func NewClient(creds Credentials, httpClient *http.Client) (*Client, error) {
 	return &Client{http: httpClient, creds: creds, UserAgent: defaultUserAgent}, nil
 }
 
+// Login performs a full authentication cycle against Hover's control panel.
+// It is safe to call when already authenticated — it re-authenticates only
+// when the session is older than sessionStaleAfter (1 hour). Safe for
+// concurrent use; the internal mutex serialises calls.
+//
+// The underlying auth flow (derived from pjslauta/hover-dyn-dns):
+//  1. GET https://www.hover.com/signin  →  extract CSRF _token
+//  2. POST https://www.hover.com/signin  (username + password + _token)
+//  3. Probe https://www.hover.com/signin/totp for a TOTP form.
+//     If a _token is present → account has MFA enabled → submit TOTP code.
+//     If the CSRF token is absent → MFA is not enabled → skip.
+//  4. Session cookies are stored in the jar for subsequent API calls.
+func (c *Client) Login(ctx context.Context) error {
+	return c.ensureLogin(ctx)
+}
+
 // ensureLogin re-authenticates iff the session is stale. Safe to call
 // before every API hit; idempotent within sessionStaleAfter.
 func (c *Client) ensureLogin(ctx context.Context) error {
@@ -85,19 +101,31 @@ func (c *Client) ensureLogin(ctx context.Context) error {
 		return fmt.Errorf("hover signin step 1: %w", err)
 	}
 
-	// Step 2 — submit TOTP. Hover re-issues a fresh `_token` on the
-	// TOTP page; refetch.
-	csrf2, err := c.fetchTOTPCSRF(ctx)
+	// Step 2 — TOTP (conditional). Probe the TOTP page for a _token.
+	// If a token is found the account has MFA enabled and we must submit
+	// a 6-digit code. If the page contains no _token the account has MFA
+	// disabled and we skip this step — no TOTP submission required.
+	//
+	// This matches the pjslauta/hover-dyn-dns behaviour: it checks the
+	// response `status == 'need_2fa'` before posting to auth2.json.
+	// The form-based portal equivalent is the presence of _token on the
+	// TOTP page.
+	csrf2, totpEnabled, err := c.probeTOTPPage(ctx)
 	if err != nil {
 		return err
 	}
-	code := c.creds.TOTPSecret.Code()
-	form = url.Values{
-		"code":   {code},
-		"_token": {csrf2},
-	}
-	if err := c.postForm(ctx, hoverHost+"/signin/totp", form); err != nil {
-		return fmt.Errorf("hover signin step 2 (totp): %w", err)
+	if totpEnabled {
+		if c.creds.TOTPSecret.key == nil {
+			return fmt.Errorf("hover: account has MFA enabled but no totp_secret was provided")
+		}
+		code := c.creds.TOTPSecret.Code()
+		form = url.Values{
+			"code":   {code},
+			"_token": {csrf2},
+		}
+		if err := c.postForm(ctx, hoverHost+"/signin/totp", form); err != nil {
+			return fmt.Errorf("hover signin step 2 (totp): %w", err)
+		}
 	}
 
 	c.loggedAt = time.Now()
@@ -110,8 +138,37 @@ func (c *Client) fetchSignInCSRF(ctx context.Context) (string, error) {
 	return c.fetchCSRF(ctx, hoverHost+"/signin")
 }
 
-func (c *Client) fetchTOTPCSRF(ctx context.Context) (string, error) {
-	return c.fetchCSRF(ctx, hoverHost+"/signin/totp")
+// probeTOTPPage fetches /signin/totp and returns:
+//   - (token, true, nil)  — page contains a _token → MFA is enabled.
+//   - ("", false, nil)    — page loaded but no _token → MFA is not enabled.
+//   - ("", false, err)    — network error, non-2xx status, or body read failure.
+//
+// Treating a non-200 response (redirect, login failure, Cloudflare gate)
+// as "MFA not enabled" would silently misclassify these errors and let
+// login appear to succeed before failing on the first API call. Status
+// + body errors are now surfaced rather than swallowed.
+func (c *Client) probeTOTPPage(ctx context.Context) (string, bool, error) {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, hoverHost+"/signin/totp", nil)
+	req.Header.Set("User-Agent", c.UserAgent)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", false, fmt.Errorf("hover: probe TOTP page: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", false, fmt.Errorf("hover: probe TOTP page: unexpected HTTP %d", resp.StatusCode)
+	}
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if readErr != nil {
+		return "", false, fmt.Errorf("hover: probe TOTP page: read body: %w", readErr)
+	}
+	m := csrfRe.FindSubmatch(body)
+	if len(m) < 2 {
+		// Page loaded successfully but no CSRF token present —
+		// account does not have MFA enabled.
+		return "", false, nil
+	}
+	return string(m[1]), true, nil
 }
 
 func (c *Client) fetchCSRF(ctx context.Context, urlStr string) (string, error) {
@@ -163,6 +220,40 @@ type Domain struct {
 	ID      string      `json:"id"`
 	Name    string      `json:"domain_name"`
 	Records []DNSRecord `json:"entries"`
+}
+
+// GetDomain returns the full Domain struct (including the
+// hover-assigned ID) for the named zone. The ID is required when
+// creating new records via CreateRecord; the human-readable name is
+// not accepted by the POST /api/dns endpoint.
+func (c *Client) GetDomain(ctx context.Context, domain string) (*Domain, error) {
+	if err := c.ensureLogin(ctx); err != nil {
+		return nil, err
+	}
+	endpoint := fmt.Sprintf("%s/api/domains/%s/dns", hoverHost, url.PathEscape(domain))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req.Header.Set("User-Agent", c.UserAgent)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("hover get domain %q: HTTP %d: %s", domain, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var wrap struct {
+		Domains []Domain `json:"domains"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&wrap); err != nil {
+		return nil, fmt.Errorf("hover get domain parse: %w", err)
+	}
+	for i := range wrap.Domains {
+		if strings.EqualFold(wrap.Domains[i].Name, domain) {
+			return &wrap.Domains[i], nil
+		}
+	}
+	return nil, fmt.Errorf("hover: domain %q not found in account", domain)
 }
 
 // ListRecords returns records for the named zone. Caller MUST pass

@@ -63,8 +63,8 @@ func TestCodeAt_RFC6238Vectors(t *testing.T) {
 		t    int64
 		want string
 	}{
-		{59, "287082"},          // Truncated to last 6 of 94287082
-		{1111111109, "081804"},  // Truncated to last 6 of 7081804
+		{59, "287082"},         // Truncated to last 6 of 94287082
+		{1111111109, "081804"}, // Truncated to last 6 of 7081804
 		{1111111111, "050471"},
 		{1234567890, "005924"},
 		{2000000000, "279037"},

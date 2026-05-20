@@ -12,11 +12,14 @@
 
 1. GET `/signin` → parse `<input name="_token">` (CSRF token).
 2. POST `/signin` with `username`, `password`, `_token`.
-3. GET `/signin/totp` → parse fresh `_token`.
-4. POST `/signin/totp` with `code` (TOTP RFC 6238) + `_token`.
-5. Session cookie now carries subsequent `/api/dns` requests.
+3. GET `/signin/totp` to probe for MFA:
+   - If the page contains a `_token`: account has MFA enabled → POST `/signin/totp`
+     with `code` (RFC 6238 TOTP) + `_token`.
+   - If no `_token`: MFA is disabled → skip the TOTP submission (the
+     GET probe itself still runs).
+4. Session cookies are stored in-memory for subsequent `/api/dns*` calls.
 
-Re-auth fires whenever the in-memory session is older than 1h.
+Re-auth fires whenever the in-memory session is older than 1 hour.
 
 ## Configuration
 
@@ -36,8 +39,8 @@ resources:
       provider: hover
       domain: example.com
       records:
-        - { type: A,     name: '@',   data: 203.0.113.10, ttl: 900 }
-        - { type: CNAME, name: 'www', data: example.com., ttl: 900 }
+        - { type: A,     name: '@',   content: 203.0.113.10, ttl: 900 }
+        - { type: CNAME, name: 'www', content: example.com.,  ttl: 900 }
 ```
 
 ## Required secrets
@@ -68,6 +71,18 @@ against [RFC 6238 Appendix B vectors](https://datatracker.ietf.org/doc/html/rfc6
   egress IP for the plugin runner.
 - **Rate limit**: Stick to small zones; Hover's account portal
   isn't optimised for bulk DNS edits.
+
+## Limitations
+
+- **No prune on apply**: `upsertRecords` only adds/updates. Records
+  that exist upstream but are not in the desired config are NOT
+  deleted on `apply`. `Diff` does flag them (so Plan reports drift),
+  but converging the actual record set requires manually deleting
+  the orphan records via Hover's UI or via a future explicit prune
+  path. Track follow-up via the project issue list.
+- **No zone delete**: Hover exposes no API to drop a DNS zone.
+  Resource `Delete` is a no-op — the IaC state is cleared but
+  upstream records remain.
 
 ## Development
 
