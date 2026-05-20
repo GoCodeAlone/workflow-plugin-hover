@@ -604,3 +604,16 @@ func TestUpsertRecords_EmptyDesiredDeletesAll(t *testing.T) {
 		t.Errorf("expected all upstream records pruned; got %d: %+v", len(fc.records), fc.records)
 	}
 }
+
+func TestDNSDriver_Diff_MissingDomain_ErrorsAtPlanTime(t *testing.T) {
+	// No name + no config.domain → domainFromSpec returns error.
+	// Diff must surface that before short-circuiting on nil current.
+	d, _ := newDriver()
+	spec := interfaces.ResourceSpec{
+		Type:   "infra.dns",
+		Config: map[string]any{"records": []any{}},
+	}
+	if _, err := d.Diff(context.Background(), spec, nil); err == nil {
+		t.Fatal("expected error for missing domain at Plan time")
+	}
+}
