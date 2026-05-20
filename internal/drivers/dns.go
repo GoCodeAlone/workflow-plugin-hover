@@ -127,13 +127,25 @@ func (d *DNSDriver) Diff(_ context.Context, desired interfaces.ResourceSpec, cur
 	if err != nil {
 		return nil, err
 	}
-	if len(desiredRecs) == 0 {
-		return &interfaces.DiffResult{NeedsUpdate: false}, nil
-	}
-
 	currentRecs, err := dnsRecordsFromOutput(current)
 	if err != nil {
 		return nil, err
+	}
+
+	// Empty desired record set with no current records → in sync.
+	// Empty desired with leftover current records → drift (everything
+	// extra needs deletion). Note: upsertRecords today does NOT delete
+	// extras (it only adds/updates), so this Diff signal currently
+	// produces a NeedsUpdate the engine cannot fully satisfy. The
+	// alternative — silently letting extras persist — is worse: the
+	// declared spec never matches reality. Operators who want strict
+	// pruning need to either explicitly add `Delete` plumbing or
+	// document the gap; flagging it is the right Plan signal.
+	if len(desiredRecs) == 0 {
+		if len(currentRecs) == 0 {
+			return &interfaces.DiffResult{NeedsUpdate: false}, nil
+		}
+		return &interfaces.DiffResult{NeedsUpdate: true}, nil
 	}
 
 	// Index current records by (type, name) for O(1) lookup. Multiple
@@ -171,6 +183,16 @@ func (d *DNSDriver) Diff(_ context.Context, desired interfaces.ResourceSpec, cur
 		// Remove the matched candidate so subsequent desired records
 		// can't re-match it.
 		currentByKey[key] = append(candidates[:idx], candidates[idx+1:]...)
+	}
+	// Any remaining candidates are records that exist upstream but
+	// are not in the desired set. Treat that as drift so the engine
+	// surfaces it during Plan, even though upsertRecords does not
+	// currently prune the extras (an explicit prune path is a
+	// separate follow-up; see README "Replace semantics" caveat).
+	for _, leftover := range currentByKey {
+		if len(leftover) > 0 {
+			return &interfaces.DiffResult{NeedsUpdate: true}, nil
+		}
 	}
 	return &interfaces.DiffResult{NeedsUpdate: false}, nil
 }

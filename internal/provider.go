@@ -5,6 +5,7 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -222,9 +223,17 @@ func (p *HoverProvider) SupportedCanonicalKeys() []string {
 // Close is a no-op; the HTTP client has no persistent connections to tear down.
 func (p *HoverProvider) Close() error { return nil }
 
+// isNotFound recognises a "resource doesn't exist upstream" error.
+// The driver wraps these with interfaces.ErrResourceNotFound, so
+// prefer the sentinel check via errors.Is. The string fallback
+// remains for any non-driver code path (raw Client errors that
+// haven't been wrapped) that still reports 404 via message text.
 func isNotFound(err error) bool {
 	if err == nil {
 		return false
+	}
+	if errors.Is(err, interfaces.ErrResourceNotFound) {
+		return true
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "not found") || strings.Contains(msg, "404")

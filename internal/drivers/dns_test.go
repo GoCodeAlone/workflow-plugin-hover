@@ -475,3 +475,59 @@ func TestRecordFromMap_StringTTL_Rejected(t *testing.T) {
 		t.Fatal("expected error for string TTL")
 	}
 }
+
+// TestDiff_ExtraCurrentRecord_DetectedAsUpdate regresses a bug where
+// Diff only checked desired ⊆ current, missing records that exist
+// upstream but were removed from desired. Removing a record from
+// config must show up in Plan even though upsertRecords doesn't
+// currently prune them (separate follow-up).
+func TestDiff_ExtraCurrentRecord_DetectedAsUpdate(t *testing.T) {
+	d, _ := newDriver()
+	spec := interfaces.ResourceSpec{
+		Name: "example.com", Type: "infra.dns",
+		Config: map[string]any{
+			"records": []any{
+				map[string]any{"type": "A", "name": "@", "content": "1.1.1.1"},
+			},
+		},
+	}
+	current := &interfaces.ResourceOutput{
+		ProviderID: "example.com",
+		Outputs: map[string]any{
+			"records": []any{
+				map[string]any{"id": "r1", "type": "A", "name": "@", "content": "1.1.1.1"},
+				map[string]any{"id": "r2", "type": "A", "name": "www", "content": "1.1.1.1"},
+			},
+		},
+	}
+	diff, err := d.Diff(context.Background(), spec, current)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	if !diff.NeedsUpdate {
+		t.Error("expected NeedsUpdate=true when current has an extra record")
+	}
+}
+
+func TestDiff_EmptyDesired_WithCurrentRecords_NeedsUpdate(t *testing.T) {
+	d, _ := newDriver()
+	spec := interfaces.ResourceSpec{
+		Name: "example.com", Type: "infra.dns",
+		Config: map[string]any{"records": []any{}},
+	}
+	current := &interfaces.ResourceOutput{
+		ProviderID: "example.com",
+		Outputs: map[string]any{
+			"records": []any{
+				map[string]any{"id": "r1", "type": "A", "name": "@", "content": "1.1.1.1"},
+			},
+		},
+	}
+	diff, err := d.Diff(context.Background(), spec, current)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	if !diff.NeedsUpdate {
+		t.Error("expected NeedsUpdate=true when desired is empty but current has records")
+	}
+}
