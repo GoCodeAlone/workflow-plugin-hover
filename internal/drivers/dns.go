@@ -1,0 +1,418 @@
+// Package drivers provides IaC ResourceDriver implementations for the Hover
+// DNS provider.
+//
+// Hover exposes NO official API. All endpoints below are derived from
+// https://github.com/pjslauta/hover-dyn-dns and browser traffic inspection.
+// Endpoint inventory (all relative to https://www.hover.com):
+//
+//	GET  /api/domains/<domain>/dns       — list records for a zone
+//	POST /api/dns                         — create a record (form: domain_id, name, type, content, ttl)
+//	PUT  /api/dns/<id>                    — update a record (form: content, ttl)
+//	DELETE /api/dns/<id>                  — delete a record
+//
+// These are undocumented; the Hover site uses them directly from the control
+// panel SPA. They may change without notice.
+package drivers
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/GoCodeAlone/workflow-plugin-hover/internal/hover"
+	"github.com/GoCodeAlone/workflow/interfaces"
+)
+
+// HoverDNSClient is the subset of hover.Client used by DNSDriver (injectable for tests).
+type HoverDNSClient interface {
+	ListRecords(ctx context.Context, domain string) ([]hover.DNSRecord, error)
+	CreateRecord(ctx context.Context, domainID string, rec hover.DNSRecord) (*hover.DNSRecord, error)
+	UpdateRecord(ctx context.Context, recordID string, rec hover.DNSRecord) error
+	DeleteRecord(ctx context.Context, recordID string) error
+}
+
+// DNSDriver manages Hover DNS zones and records (infra.dns).
+// ProviderID is the apex domain name (e.g. "example.com").
+type DNSDriver struct {
+	client HoverDNSClient
+}
+
+// NewDNSDriver creates a DNSDriver backed by a real hover.Client.
+func NewDNSDriver(c *hover.Client) *DNSDriver {
+	return &DNSDriver{client: c}
+}
+
+// NewDNSDriverWithClient creates a driver with an injected client (for tests).
+func NewDNSDriverWithClient(c HoverDNSClient) *DNSDriver {
+	return &DNSDriver{client: c}
+}
+
+// Create idempotently reconciles a DNS zone on Hover. It creates missing
+// records and updates existing ones that differ. Hover does not support
+// creating zones via API — the domain must already be registered and in the
+// account.
+//
+// Config keys:
+//
+//	domain   string      — apex zone name (e.g. "example.com"). Falls back to spec.Name.
+//	records  []any       — each element: {type, name, content, ttl?}
+func (d *DNSDriver) Create(ctx context.Context, spec interfaces.ResourceSpec) (*interfaces.ResourceOutput, error) {
+	domain, err := domainFromSpec(spec)
+	if err != nil {
+		return nil, err
+	}
+	desired, err := declaredRecords(spec.Config)
+	if err != nil {
+		return nil, err
+	}
+	if err := d.upsertRecords(ctx, domain, desired); err != nil {
+		return nil, err
+	}
+	return d.readOutput(ctx, domain, spec.Name)
+}
+
+func (d *DNSDriver) Read(ctx context.Context, ref interfaces.ResourceRef) (*interfaces.ResourceOutput, error) {
+	return d.readOutput(ctx, ref.ProviderID, ref.Name)
+}
+
+func (d *DNSDriver) Update(ctx context.Context, ref interfaces.ResourceRef, spec interfaces.ResourceSpec) (*interfaces.ResourceOutput, error) {
+	domain, err := domainFromSpec(spec)
+	if err != nil {
+		return nil, err
+	}
+	if ref.ProviderID != "" && !strings.EqualFold(domain, ref.ProviderID) {
+		return nil, fmt.Errorf("hover dns: cannot rename zone from %q to %q — delete and re-create", ref.ProviderID, domain)
+	}
+	desired, err := declaredRecords(spec.Config)
+	if err != nil {
+		return nil, err
+	}
+	if err := d.upsertRecords(ctx, domain, desired); err != nil {
+		return nil, err
+	}
+	return d.readOutput(ctx, domain, spec.Name)
+}
+
+func (d *DNSDriver) Delete(_ context.Context, _ interfaces.ResourceRef) error {
+	// Hover does not expose a "delete zone" API.
+	// Deleting individual records is possible but not done here because the
+	// zone itself (the domain registration) must be managed outside the IaC
+	// surface. Destroying infra.dns is therefore a no-op; operators must
+	// manually remove records they no longer need.
+	return nil
+}
+
+func (d *DNSDriver) Diff(_ context.Context, desired interfaces.ResourceSpec, current *interfaces.ResourceOutput) (*interfaces.DiffResult, error) {
+	if current == nil {
+		return &interfaces.DiffResult{NeedsUpdate: true}, nil
+	}
+
+	desiredDomain, hasDomain, err := domainFromConfigIfPresent(desired.Config)
+	if err != nil {
+		return nil, err
+	}
+	if hasDomain && !strings.EqualFold(desiredDomain, current.ProviderID) {
+		return &interfaces.DiffResult{
+			NeedsUpdate:  true,
+			NeedsReplace: true,
+			Changes: []interfaces.FieldChange{
+				{Path: "domain", Old: current.ProviderID, New: desiredDomain, ForceNew: true},
+			},
+		}, nil
+	}
+
+	desiredRecs, err := declaredRecords(desired.Config)
+	if err != nil {
+		return nil, err
+	}
+	if len(desiredRecs) == 0 {
+		return &interfaces.DiffResult{NeedsUpdate: false}, nil
+	}
+
+	currentRecs, err := dnsRecordsFromOutput(current)
+	if err != nil {
+		return nil, err
+	}
+
+	// Index current records by (type, name) for O(1) lookup.
+	currentByKey := make(map[string][]hover.DNSRecord)
+	for _, r := range currentRecs {
+		key := recordKey(r.Type, r.Name)
+		currentByKey[key] = append(currentByKey[key], r)
+	}
+
+	for _, dr := range desiredRecs {
+		key := recordKey(dr.Type, dr.Name)
+		candidates := currentByKey[key]
+		if len(candidates) == 0 {
+			return &interfaces.DiffResult{NeedsUpdate: true}, nil
+		}
+		if candidates[0].Content != dr.Content {
+			return &interfaces.DiffResult{NeedsUpdate: true}, nil
+		}
+		currentByKey[key] = candidates[1:]
+	}
+	return &interfaces.DiffResult{NeedsUpdate: false}, nil
+}
+
+func (d *DNSDriver) HealthCheck(ctx context.Context, ref interfaces.ResourceRef) (*interfaces.HealthResult, error) {
+	_, err := d.client.ListRecords(ctx, ref.ProviderID)
+	if err != nil {
+		return &interfaces.HealthResult{Healthy: false, Message: err.Error()}, nil
+	}
+	return &interfaces.HealthResult{Healthy: true}, nil
+}
+
+func (d *DNSDriver) Scale(_ context.Context, _ interfaces.ResourceRef, _ int) (*interfaces.ResourceOutput, error) {
+	return nil, fmt.Errorf("hover dns: scale is not supported")
+}
+
+func (d *DNSDriver) SensitiveKeys() []string { return nil }
+
+func (d *DNSDriver) ProviderIDFormat() interfaces.ProviderIDFormat {
+	return interfaces.IDFormatDomainName
+}
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+func (d *DNSDriver) readOutput(ctx context.Context, domain, name string) (*interfaces.ResourceOutput, error) {
+	recs, err := d.client.ListRecords(ctx, domain)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return nil, fmt.Errorf("%w: hover dns zone %q", interfaces.ErrResourceNotFound, domain)
+		}
+		return nil, fmt.Errorf("hover dns read %q: %w", domain, err)
+	}
+	return dnsOutput(domain, name, recs), nil
+}
+
+func (d *DNSDriver) upsertRecords(ctx context.Context, domain string, desired []hover.DNSRecord) error {
+	if len(desired) == 0 {
+		return nil
+	}
+	existing, err := d.client.ListRecords(ctx, domain)
+	if err != nil {
+		return fmt.Errorf("hover dns list records %q: %w", domain, err)
+	}
+
+	existingByKey := make(map[string][]hover.DNSRecord)
+	for _, r := range existing {
+		key := recordKey(r.Type, r.Name)
+		existingByKey[key] = append(existingByKey[key], r)
+	}
+
+	for _, dr := range desired {
+		key := recordKey(dr.Type, dr.Name)
+		candidates := existingByKey[key]
+		if len(candidates) > 0 {
+			ex := candidates[0]
+			existingByKey[key] = candidates[1:]
+			if ex.Content == dr.Content && (dr.TTL == 0 || ex.TTL == dr.TTL) {
+				continue // already matches
+			}
+			if err := d.client.UpdateRecord(ctx, ex.ID, dr); err != nil {
+				return fmt.Errorf("hover dns update %s/%s %q: %w", dr.Type, dr.Name, domain, err)
+			}
+		} else {
+			created, err := d.client.CreateRecord(ctx, domain, dr)
+			if err != nil {
+				return fmt.Errorf("hover dns create %s/%s %q: %w", dr.Type, dr.Name, domain, err)
+			}
+			if created != nil {
+				key2 := recordKey(created.Type, created.Name)
+				existingByKey[key2] = append(existingByKey[key2], *created)
+			}
+		}
+	}
+	return nil
+}
+
+func domainFromSpec(spec interfaces.ResourceSpec) (string, error) {
+	domain, ok, err := domainFromConfigIfPresent(spec.Config)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		domain = spec.Name
+	}
+	if domain == "" {
+		return "", fmt.Errorf("hover dns: domain is required (set config.domain or resource name)")
+	}
+	return domain, nil
+}
+
+func domainFromConfigIfPresent(config map[string]any) (string, bool, error) {
+	v, ok := config["domain"]
+	if !ok {
+		return "", false, nil
+	}
+	s, ok := v.(string)
+	if !ok {
+		return "", true, fmt.Errorf("hover dns: config.domain must be a string")
+	}
+	if s == "" {
+		return "", true, fmt.Errorf("hover dns: config.domain must not be empty")
+	}
+	return s, true, nil
+}
+
+// declaredRecords parses config["records"] into a []hover.DNSRecord slice.
+func declaredRecords(config map[string]any) ([]hover.DNSRecord, error) {
+	raw, ok := config["records"]
+	if !ok {
+		return nil, nil
+	}
+	items, err := toSliceOfMaps(raw)
+	if err != nil {
+		return nil, fmt.Errorf("hover dns: config.records: %w", err)
+	}
+	out := make([]hover.DNSRecord, 0, len(items))
+	for i, m := range items {
+		rec, err := recordFromMap(i, m)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rec)
+	}
+	return out, nil
+}
+
+func toSliceOfMaps(v any) ([]map[string]any, error) {
+	switch typed := v.(type) {
+	case []map[string]any:
+		return typed, nil
+	case []any:
+		out := make([]map[string]any, 0, len(typed))
+		for i, item := range typed {
+			m, ok := item.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("records[%d] must be an object", i)
+			}
+			out = append(out, m)
+		}
+		return out, nil
+	default:
+		return nil, errors.New("must be a list")
+	}
+}
+
+func recordFromMap(index int, m map[string]any) (hover.DNSRecord, error) {
+	typ, err := requiredString(m, "type", index)
+	if err != nil {
+		return hover.DNSRecord{}, err
+	}
+	name, err := requiredString(m, "name", index)
+	if err != nil {
+		return hover.DNSRecord{}, err
+	}
+	content, err := requiredString(m, "content", index)
+	if err != nil {
+		return hover.DNSRecord{}, err
+	}
+	ttl, _ := optionalInt(m, "ttl")
+	return hover.DNSRecord{
+		Type:    strings.ToUpper(typ),
+		Name:    name,
+		Content: content,
+		TTL:     ttl,
+	}, nil
+}
+
+func requiredString(m map[string]any, key string, index int) (string, error) {
+	v, ok := m[key]
+	if !ok {
+		return "", fmt.Errorf("hover dns: records[%d].%s is required", index, key)
+	}
+	s, ok := v.(string)
+	if !ok || s == "" {
+		return "", fmt.Errorf("hover dns: records[%d].%s must be a non-empty string", index, key)
+	}
+	return s, nil
+}
+
+func optionalInt(m map[string]any, key string) (int, bool) {
+	v, ok := m[key]
+	if !ok {
+		return 0, false
+	}
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case float64:
+		return int(n), true
+	}
+	return 0, false
+}
+
+func recordKey(typ, name string) string {
+	return strings.ToUpper(typ) + "\x00" + strings.ToLower(name)
+}
+
+// dnsRecordsFromOutput deserialises the "records" key from a ResourceOutput
+// Outputs map back into []hover.DNSRecord for diffing.
+func dnsRecordsFromOutput(out *interfaces.ResourceOutput) ([]hover.DNSRecord, error) {
+	if out == nil || out.Outputs == nil {
+		return nil, nil
+	}
+	raw, ok := out.Outputs["records"]
+	if !ok || raw == nil {
+		return nil, nil
+	}
+	items, err := toSliceOfMaps(raw)
+	if err != nil {
+		return nil, fmt.Errorf("hover dns: outputs.records: %w", err)
+	}
+	recs := make([]hover.DNSRecord, 0, len(items))
+	for i, m := range items {
+		typ, _ := m["type"].(string)
+		name, _ := m["name"].(string)
+		content, _ := m["content"].(string)
+		ttl, _ := optionalInt(m, "ttl")
+		id, _ := m["id"].(string)
+		if typ == "" || name == "" {
+			continue
+		}
+		_ = i
+		recs = append(recs, hover.DNSRecord{
+			ID:      id,
+			Type:    typ,
+			Name:    name,
+			Content: content,
+			TTL:     ttl,
+		})
+	}
+	return recs, nil
+}
+
+// dnsOutput builds the structpb-safe ResourceOutput for a Hover DNS zone.
+// All Outputs values are primitive leaves (string/int/bool) — no typed slices.
+// Records are encoded as []map[string]any per the structpb-boundary invariant.
+func dnsOutput(domain, name string, records []hover.DNSRecord) *interfaces.ResourceOutput {
+	outputs := map[string]any{
+		"domain": domain,
+	}
+	if records != nil {
+		recs := make([]any, 0, len(records))
+		for _, r := range records {
+			entry := map[string]any{
+				"id":      r.ID,
+				"type":    r.Type,
+				"name":    r.Name,
+				"content": r.Content,
+				"ttl":     r.TTL,
+			}
+			recs = append(recs, entry)
+		}
+		outputs["records"] = recs
+	}
+	return &interfaces.ResourceOutput{
+		Name:       name,
+		Type:       "infra.dns",
+		ProviderID: domain,
+		Outputs:    outputs,
+		Status:     "active",
+	}
+}

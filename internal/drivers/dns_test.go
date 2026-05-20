@@ -1,0 +1,326 @@
+package drivers
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"testing"
+
+	"github.com/GoCodeAlone/workflow-plugin-hover/internal/hover"
+	"github.com/GoCodeAlone/workflow/interfaces"
+)
+
+// fakeClient is a test double for HoverDNSClient.
+type fakeClient struct {
+	records   []hover.DNSRecord
+	createErr error
+	updateErr error
+	deleteErr error
+	listErr   error
+	nextID    int
+}
+
+func (f *fakeClient) ListRecords(_ context.Context, _ string) ([]hover.DNSRecord, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	out := make([]hover.DNSRecord, len(f.records))
+	copy(out, f.records)
+	return out, nil
+}
+
+func (f *fakeClient) CreateRecord(_ context.Context, _ string, rec hover.DNSRecord) (*hover.DNSRecord, error) {
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
+	f.nextID++
+	rec.ID = fmt.Sprintf("dns%d", f.nextID)
+	f.records = append(f.records, rec)
+	cp := rec
+	return &cp, nil
+}
+
+func (f *fakeClient) UpdateRecord(_ context.Context, id string, rec hover.DNSRecord) error {
+	if f.updateErr != nil {
+		return f.updateErr
+	}
+	for i, r := range f.records {
+		if r.ID == id {
+			f.records[i].Content = rec.Content
+			if rec.TTL > 0 {
+				f.records[i].TTL = rec.TTL
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("record %q not found", id)
+}
+
+func (f *fakeClient) DeleteRecord(_ context.Context, id string) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	for i, r := range f.records {
+		if r.ID == id {
+			f.records = append(f.records[:i], f.records[i+1:]...)
+			return nil
+		}
+	}
+	return fmt.Errorf("record %q not found", id)
+}
+
+func newDriver(records ...hover.DNSRecord) (*DNSDriver, *fakeClient) {
+	fc := &fakeClient{records: records}
+	return NewDNSDriverWithClient(fc), fc
+}
+
+func TestDNSDriver_Create_Empty(t *testing.T) {
+	d, _ := newDriver()
+	spec := interfaces.ResourceSpec{Name: "example.com", Type: "infra.dns", Config: map[string]any{}}
+	out, err := d.Create(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if out.ProviderID != "example.com" {
+		t.Errorf("ProviderID = %q want %q", out.ProviderID, "example.com")
+	}
+}
+
+func TestDNSDriver_Create_WithRecords(t *testing.T) {
+	d, fc := newDriver()
+	spec := interfaces.ResourceSpec{
+		Name: "example.com", Type: "infra.dns",
+		Config: map[string]any{
+			"records": []any{
+				map[string]any{"type": "A", "name": "@", "content": "1.2.3.4", "ttl": 300},
+			},
+		},
+	}
+	out, err := d.Create(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if len(fc.records) != 1 {
+		t.Errorf("client.records len = %d want 1", len(fc.records))
+	}
+	recs, ok := out.Outputs["records"].([]any)
+	if !ok || len(recs) != 1 {
+		t.Errorf("outputs.records: %v", out.Outputs["records"])
+	}
+}
+
+func TestDNSDriver_Create_UpdatesExistingRecord(t *testing.T) {
+	existing := hover.DNSRecord{ID: "r1", Type: "A", Name: "@", Content: "1.1.1.1", TTL: 300}
+	d, fc := newDriver(existing)
+
+	spec := interfaces.ResourceSpec{
+		Name: "example.com", Type: "infra.dns",
+		Config: map[string]any{
+			"records": []any{
+				map[string]any{"type": "A", "name": "@", "content": "2.2.2.2"},
+			},
+		},
+	}
+	_, err := d.Create(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if fc.records[0].Content != "2.2.2.2" {
+		t.Errorf("record not updated: content=%q", fc.records[0].Content)
+	}
+}
+
+func TestDNSDriver_Diff_NilCurrent(t *testing.T) {
+	d, _ := newDriver()
+	spec := interfaces.ResourceSpec{Name: "example.com", Type: "infra.dns", Config: map[string]any{}}
+	diff, err := d.Diff(context.Background(), spec, nil)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	if !diff.NeedsUpdate {
+		t.Error("expected NeedsUpdate=true for nil current")
+	}
+}
+
+func TestDNSDriver_Diff_UpToDate(t *testing.T) {
+	d, _ := newDriver()
+	spec := interfaces.ResourceSpec{
+		Name: "example.com", Type: "infra.dns",
+		Config: map[string]any{
+			"records": []any{
+				map[string]any{"type": "A", "name": "@", "content": "1.2.3.4"},
+			},
+		},
+	}
+	current := &interfaces.ResourceOutput{
+		ProviderID: "example.com",
+		Outputs: map[string]any{
+			"records": []any{
+				map[string]any{"id": "r1", "type": "A", "name": "@", "content": "1.2.3.4", "ttl": 300},
+			},
+		},
+	}
+	diff, err := d.Diff(context.Background(), spec, current)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	if diff.NeedsUpdate {
+		t.Error("expected NeedsUpdate=false for up-to-date state")
+	}
+}
+
+func TestDNSDriver_Diff_RecordChanged(t *testing.T) {
+	d, _ := newDriver()
+	spec := interfaces.ResourceSpec{
+		Name: "example.com", Type: "infra.dns",
+		Config: map[string]any{
+			"records": []any{
+				map[string]any{"type": "A", "name": "@", "content": "9.9.9.9"},
+			},
+		},
+	}
+	current := &interfaces.ResourceOutput{
+		ProviderID: "example.com",
+		Outputs: map[string]any{
+			"records": []any{
+				map[string]any{"id": "r1", "type": "A", "name": "@", "content": "1.1.1.1", "ttl": 300},
+			},
+		},
+	}
+	diff, err := d.Diff(context.Background(), spec, current)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	if !diff.NeedsUpdate {
+		t.Error("expected NeedsUpdate=true for changed record")
+	}
+}
+
+func TestDNSDriver_Diff_DomainChange_ForceReplace(t *testing.T) {
+	d, _ := newDriver()
+	spec := interfaces.ResourceSpec{
+		Name:   "new.com",
+		Type:   "infra.dns",
+		Config: map[string]any{"domain": "new.com"},
+	}
+	current := &interfaces.ResourceOutput{ProviderID: "old.com"}
+	diff, err := d.Diff(context.Background(), spec, current)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	if !diff.NeedsReplace {
+		t.Error("expected NeedsReplace=true for domain change")
+	}
+}
+
+func TestDNSDriver_Read_NotFound(t *testing.T) {
+	d, fc := newDriver()
+	fc.listErr = errors.New("not found: no such domain")
+	_, err := d.Read(context.Background(), interfaces.ResourceRef{Name: "gone.com", ProviderID: "gone.com"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, interfaces.ErrResourceNotFound) {
+		t.Errorf("want ErrResourceNotFound wrapping, got: %v", err)
+	}
+}
+
+func TestDNSDriver_Update_DomainRenameRejected(t *testing.T) {
+	d, _ := newDriver()
+	spec := interfaces.ResourceSpec{
+		Name: "new.com", Type: "infra.dns",
+		Config: map[string]any{"domain": "new.com"},
+	}
+	ref := interfaces.ResourceRef{Name: "old.com", ProviderID: "old.com"}
+	_, err := d.Update(context.Background(), ref, spec)
+	if err == nil {
+		t.Fatal("expected error for domain rename")
+	}
+}
+
+func TestDNSDriver_Delete_NoOp(t *testing.T) {
+	d, _ := newDriver(hover.DNSRecord{ID: "r1", Type: "A", Name: "@", Content: "1.1.1.1"})
+	err := d.Delete(context.Background(), interfaces.ResourceRef{Name: "example.com", ProviderID: "example.com"})
+	if err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+}
+
+func TestDNSDriver_HealthCheck_Healthy(t *testing.T) {
+	d, _ := newDriver()
+	h, err := d.HealthCheck(context.Background(), interfaces.ResourceRef{ProviderID: "example.com"})
+	if err != nil {
+		t.Fatalf("HealthCheck: %v", err)
+	}
+	if !h.Healthy {
+		t.Error("expected healthy")
+	}
+}
+
+func TestDNSDriver_HealthCheck_Unhealthy(t *testing.T) {
+	d, fc := newDriver()
+	fc.listErr = errors.New("API down")
+	h, err := d.HealthCheck(context.Background(), interfaces.ResourceRef{ProviderID: "example.com"})
+	if err != nil {
+		t.Fatalf("HealthCheck: %v", err)
+	}
+	if h.Healthy {
+		t.Error("expected unhealthy")
+	}
+}
+
+func TestDNSDriver_Scale_Unsupported(t *testing.T) {
+	d, _ := newDriver()
+	_, err := d.Scale(context.Background(), interfaces.ResourceRef{}, 2)
+	if err == nil {
+		t.Fatal("expected error from Scale")
+	}
+}
+
+func TestDNSDriver_SensitiveKeys(t *testing.T) {
+	d, _ := newDriver()
+	if keys := d.SensitiveKeys(); keys != nil {
+		t.Errorf("SensitiveKeys = %v; want nil", keys)
+	}
+}
+
+func TestDeclaredRecords_BadType(t *testing.T) {
+	_, err := declaredRecords(map[string]any{"records": "not-a-list"})
+	if err == nil {
+		t.Fatal("expected error for non-list records")
+	}
+}
+
+func TestDeclaredRecords_MissingType(t *testing.T) {
+	_, err := declaredRecords(map[string]any{
+		"records": []any{
+			map[string]any{"name": "@", "content": "1.1.1.1"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for missing type")
+	}
+}
+
+func TestDNSOutput_Structpb(t *testing.T) {
+	records := []hover.DNSRecord{
+		{ID: "r1", Type: "A", Name: "@", Content: "1.2.3.4", TTL: 300},
+	}
+	out := dnsOutput("example.com", "my-zone", records)
+	// outputs["records"] must be []any, not []hover.DNSRecord,
+	// to be structpb-safe.
+	recs, ok := out.Outputs["records"].([]any)
+	if !ok {
+		t.Fatalf("outputs.records must be []any for structpb safety; got %T", out.Outputs["records"])
+	}
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(recs))
+	}
+	entry, ok := recs[0].(map[string]any)
+	if !ok {
+		t.Fatalf("record entry must be map[string]any; got %T", recs[0])
+	}
+	if entry["type"] != "A" || entry["name"] != "@" || entry["content"] != "1.2.3.4" {
+		t.Errorf("unexpected record entry: %v", entry)
+	}
+}

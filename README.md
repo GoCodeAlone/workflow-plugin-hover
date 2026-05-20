@@ -12,11 +12,13 @@
 
 1. GET `/signin` → parse `<input name="_token">` (CSRF token).
 2. POST `/signin` with `username`, `password`, `_token`.
-3. GET `/signin/totp` → parse fresh `_token`.
-4. POST `/signin/totp` with `code` (TOTP RFC 6238) + `_token`.
-5. Session cookie now carries subsequent `/api/dns` requests.
+3. GET `/signin/totp` to probe for MFA:
+   - If the page contains a `_token`: account has MFA enabled → POST `/signin/totp`
+     with `code` (RFC 6238 TOTP) + `_token`.
+   - If no `_token`: MFA is disabled → skip step 3.
+4. Session cookies are stored in-memory for subsequent `/api/dns*` calls.
 
-Re-auth fires whenever the in-memory session is older than 1h.
+Re-auth fires whenever the in-memory session is older than 1 hour.
 
 ## Configuration
 
@@ -36,8 +38,8 @@ resources:
       provider: hover
       domain: example.com
       records:
-        - { type: A,     name: '@',   data: 203.0.113.10, ttl: 900 }
-        - { type: CNAME, name: 'www', data: example.com., ttl: 900 }
+        - { type: A,     name: '@',   content: 203.0.113.10, ttl: 900 }
+        - { type: CNAME, name: 'www', content: example.com.,  ttl: 900 }
 ```
 
 ## Required secrets

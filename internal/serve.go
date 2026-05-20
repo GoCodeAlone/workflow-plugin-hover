@@ -1,11 +1,13 @@
 // Package internal — Hover plugin entry point.
 package internal
 
-// Serve is the gRPC plugin entry-point. Full driver registration
-// lands once workflow#640 Phase 3 (typed IaC ResourceDriver
-// surface) stabilises. Until then the Hover client lives in
-// internal/hover and the scaffold compiles + tests on its own.
+import (
+	sdk "github.com/GoCodeAlone/workflow/plugin/external/sdk"
+)
+
+// Serve starts the Hover IaC plugin gRPC server. Called from cmd/main.go.
+// The SDK auto-registers every typed pb.IaCProvider*Server interface that
+// *hoverIaCServer satisfies via Go type-assertion at plugin startup.
 func Serve() {
-	// placeholder; see workflow-plugin-namecheap/internal/serve.go
-	// for the eventual SDK invocation.
+	sdk.ServeIaCPlugin(NewIaCServer(), sdk.IaCServeOptions{})
 }
