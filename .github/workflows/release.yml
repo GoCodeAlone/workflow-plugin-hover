@@ -33,7 +33,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Unset credentialed git config
         if: always()
-        run: git config --global --unset-all url."https://x-access-token:${{ secrets.RELEASES_TOKEN }}@github.com/GoCodeAlone/".insteadOf || true
+        env:
+          RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          git config --global --unset-all "url.https://x-access-token:${RELEASES_TOKEN}@github.com/GoCodeAlone/.insteadOf" || true
       - name: Publish release (was draft during asset upload)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
