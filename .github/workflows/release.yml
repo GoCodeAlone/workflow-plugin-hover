@@ -9,14 +9,21 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - name: Configure Git for private repos
-        run: git config --global url."https://x-access-token:${{ secrets.RELEASES_TOKEN }}@github.com/".insteadOf "https://github.com/"
+      - name: Configure Git for private GoCodeAlone repos
+        env:
+          RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          if [ -z "$RELEASES_TOKEN" ]; then
+            echo "::error::RELEASES_TOKEN secret is not set. The goreleaser step needs it to resolve private GoCodeAlone module deps." >&2
+            exit 1
+          fi
+          git config --global url."https://x-access-token:${RELEASES_TOKEN}@github.com/GoCodeAlone/".insteadOf "https://github.com/GoCodeAlone/"
       - uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
