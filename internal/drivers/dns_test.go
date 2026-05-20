@@ -92,14 +92,25 @@ func newDriver(records ...hover.DNSRecord) (*DNSDriver, *fakeClient) {
 }
 
 func TestDNSDriver_Create_Empty(t *testing.T) {
+	// Explicitly-empty records list is the supported way to declare
+	// "no DNS records on this zone". A missing records key is now an
+	// error (would otherwise silently prune everything upstream).
 	d, _ := newDriver()
-	spec := interfaces.ResourceSpec{Name: "example.com", Type: "infra.dns", Config: map[string]any{}}
+	spec := interfaces.ResourceSpec{Name: "example.com", Type: "infra.dns", Config: map[string]any{"records": []any{}}}
 	out, err := d.Create(context.Background(), spec)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	if out.ProviderID != "example.com" {
 		t.Errorf("ProviderID = %q want %q", out.ProviderID, "example.com")
+	}
+}
+
+func TestDNSDriver_Create_MissingRecordsKey_Rejected(t *testing.T) {
+	d, _ := newDriver()
+	spec := interfaces.ResourceSpec{Name: "example.com", Type: "infra.dns", Config: map[string]any{}}
+	if _, err := d.Create(context.Background(), spec); err == nil {
+		t.Fatal("expected error for missing config.records key")
 	}
 }
 
@@ -218,7 +229,7 @@ func TestDNSDriver_Diff_DomainChange_ForceReplace(t *testing.T) {
 	spec := interfaces.ResourceSpec{
 		Name:   "new.com",
 		Type:   "infra.dns",
-		Config: map[string]any{"domain": "new.com"},
+		Config: map[string]any{"domain": "new.com", "records": []any{}},
 	}
 	current := &interfaces.ResourceOutput{ProviderID: "old.com"}
 	diff, err := d.Diff(context.Background(), spec, current)
@@ -246,7 +257,7 @@ func TestDNSDriver_Update_DomainRenameRejected(t *testing.T) {
 	d, _ := newDriver()
 	spec := interfaces.ResourceSpec{
 		Name: "new.com", Type: "infra.dns",
-		Config: map[string]any{"domain": "new.com"},
+		Config: map[string]any{"domain": "new.com", "records": []any{}},
 	}
 	ref := interfaces.ResourceRef{Name: "old.com", ProviderID: "old.com"}
 	_, err := d.Update(context.Background(), ref, spec)

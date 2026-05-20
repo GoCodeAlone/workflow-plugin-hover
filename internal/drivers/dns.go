@@ -134,13 +134,7 @@ func (d *DNSDriver) Diff(_ context.Context, desired interfaces.ResourceSpec, cur
 
 	// Empty desired record set with no current records → in sync.
 	// Empty desired with leftover current records → drift (everything
-	// extra needs deletion). Note: upsertRecords today does NOT delete
-	// extras (it only adds/updates), so this Diff signal currently
-	// produces a NeedsUpdate the engine cannot fully satisfy. The
-	// alternative — silently letting extras persist — is worse: the
-	// declared spec never matches reality. Operators who want strict
-	// pruning need to either explicitly add `Delete` plumbing or
-	// document the gap; flagging it is the right Plan signal.
+	// extra needs deletion); upsertRecords prunes them during apply.
 	if len(desiredRecs) == 0 {
 		if len(currentRecs) == 0 {
 			return &interfaces.DiffResult{NeedsUpdate: false}, nil
@@ -348,10 +342,17 @@ func domainFromConfigIfPresent(config map[string]any) (string, bool, error) {
 }
 
 // declaredRecords parses config["records"] into a []hover.DNSRecord slice.
+//
+// `records` is REQUIRED. A missing key errors out — silently coercing
+// to an empty slice would let upsertRecords prune every upstream
+// record, which is rarely what an operator intends when they forgot
+// to set the key. An explicitly empty `records: []` IS allowed (and
+// does deliberately prune everything); only the missing-key /
+// wrong-type cases are rejected.
 func declaredRecords(config map[string]any) ([]hover.DNSRecord, error) {
-	raw, ok := config["records"]
-	if !ok {
-		return nil, nil
+	raw, present := config["records"]
+	if !present {
+		return nil, fmt.Errorf("hover dns: config.records is required (use an explicit 'records: []' to drop every record)")
 	}
 	items, err := toSliceOfMaps(raw)
 	if err != nil {

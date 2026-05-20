@@ -5,7 +5,6 @@ project_name: workflow-plugin-hover
 before:
   hooks:
     - "sh -c \"rm -rf .release && mkdir -p .release && cp plugin.json .release/plugin.json && sed -i.bak 's/\\\"version\\\": \\\".*\\\"/\\\"version\\\": \\\"{{ .Version }}\\\"/' .release/plugin.json && rm -f .release/plugin.json.bak\""
-    - "sh -c \"sed -i.bak 's|/releases/download/v[^/]*/|/releases/download/{{ .Tag }}/|g' .release/plugin.json && rm -f .release/plugin.json.bak\""
 
 builds:
   - id: workflow-plugin-hover
