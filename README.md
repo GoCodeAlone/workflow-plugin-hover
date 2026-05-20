@@ -43,6 +43,15 @@ resources:
         - { type: CNAME, name: 'www', content: example.com.,  ttl: 900 }
 ```
 
+The `records` key is **required**. The plugin treats your declared
+list as authoritative: on apply, records present upstream but
+absent from `records` are deleted, records present in `records`
+but absent upstream are created, and records that differ are
+updated. To deliberately drop every record from a zone, set
+`records: []` — that explicit empty list is the only way to ask
+for a wipe. Omitting `records` entirely is rejected at Plan time
+to avoid the "I forgot the key and lost my zone" failure mode.
+
 ## Required secrets
 
 | Name | Sensitive | Source |

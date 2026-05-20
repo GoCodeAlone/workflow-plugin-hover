@@ -105,6 +105,16 @@ func (d *DNSDriver) Delete(_ context.Context, _ interfaces.ResourceRef) error {
 }
 
 func (d *DNSDriver) Diff(_ context.Context, desired interfaces.ResourceSpec, current *interfaces.ResourceOutput) (*interfaces.DiffResult, error) {
+	// Validate the desired spec up front so config errors surface at
+	// Plan time, even for brand-new resources (current == nil) where
+	// the engine would otherwise just see NeedsUpdate=true and let
+	// Apply discover the same problem one stage later. declaredRecords
+	// also covers the "config.records is required" check.
+	desiredRecs, err := declaredRecords(desired.Config)
+	if err != nil {
+		return nil, err
+	}
+
 	if current == nil {
 		return &interfaces.DiffResult{NeedsUpdate: true}, nil
 	}
@@ -123,10 +133,6 @@ func (d *DNSDriver) Diff(_ context.Context, desired interfaces.ResourceSpec, cur
 		}, nil
 	}
 
-	desiredRecs, err := declaredRecords(desired.Config)
-	if err != nil {
-		return nil, err
-	}
 	currentRecs, err := dnsRecordsFromOutput(current)
 	if err != nil {
 		return nil, err

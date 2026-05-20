@@ -159,14 +159,25 @@ func TestDNSDriver_Create_UpdatesExistingRecord(t *testing.T) {
 }
 
 func TestDNSDriver_Diff_NilCurrent(t *testing.T) {
+	// Diff now validates config.records up front so config errors
+	// surface at Plan time even for new resources. Use an explicit
+	// empty records list to exercise the nil-current early-return path.
 	d, _ := newDriver()
-	spec := interfaces.ResourceSpec{Name: "example.com", Type: "infra.dns", Config: map[string]any{}}
+	spec := interfaces.ResourceSpec{Name: "example.com", Type: "infra.dns", Config: map[string]any{"records": []any{}}}
 	diff, err := d.Diff(context.Background(), spec, nil)
 	if err != nil {
 		t.Fatalf("Diff: %v", err)
 	}
 	if !diff.NeedsUpdate {
 		t.Error("expected NeedsUpdate=true for nil current")
+	}
+}
+
+func TestDNSDriver_Diff_MissingRecordsKey_ErrorsAtPlanTime(t *testing.T) {
+	d, _ := newDriver()
+	spec := interfaces.ResourceSpec{Name: "example.com", Type: "infra.dns", Config: map[string]any{}}
+	if _, err := d.Diff(context.Background(), spec, nil); err == nil {
+		t.Fatal("expected error for missing config.records at Plan time")
 	}
 }
 
