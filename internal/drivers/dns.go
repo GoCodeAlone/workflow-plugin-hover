@@ -185,10 +185,9 @@ func (d *DNSDriver) Diff(_ context.Context, desired interfaces.ResourceSpec, cur
 		currentByKey[key] = append(candidates[:idx], candidates[idx+1:]...)
 	}
 	// Any remaining candidates are records that exist upstream but
-	// are not in the desired set. Treat that as drift so the engine
-	// surfaces it during Plan, even though upsertRecords does not
-	// currently prune the extras (an explicit prune path is a
-	// separate follow-up; see the "Limitations" section of README.md).
+	// are not in the desired set. Treat that as drift so Plan
+	// surfaces the change to the operator; upsertRecords prunes
+	// them during apply.
 	for _, leftover := range currentByKey {
 		if len(leftover) > 0 {
 			return &interfaces.DiffResult{NeedsUpdate: true}, nil
@@ -229,9 +228,9 @@ func (d *DNSDriver) readOutput(ctx context.Context, domain, name string) (*inter
 }
 
 func (d *DNSDriver) upsertRecords(ctx context.Context, domain string, desired []hover.DNSRecord) error {
-	if len(desired) == 0 {
-		return nil
-	}
+	// An empty desired set means "drop everything" — fall through into
+	// the prune step rather than short-circuiting. Without this, an
+	// explicit `records: []` would still leave upstream records intact.
 
 	// Hover's POST /api/dns endpoint requires `domain_id` (hover-assigned
 	// numeric ID), NOT the apex name. Resolve the domain up front via
@@ -293,12 +292,26 @@ func (d *DNSDriver) upsertRecords(ctx context.Context, domain string, desired []
 				return fmt.Errorf("hover dns update %s/%s %q: %w", dr.Type, dr.Name, domain, err)
 			}
 		} else {
-			created, err := d.client.CreateRecord(ctx, dom.ID, dr)
-			if err != nil {
+			if _, err := d.client.CreateRecord(ctx, dom.ID, dr); err != nil {
 				return fmt.Errorf("hover dns create %s/%s %q: %w", dr.Type, dr.Name, domain, err)
 			}
-			if created != nil {
-				existingByKey[key] = append(existingByKey[key], *created)
+			// Do NOT add the created record back into existingByKey.
+			// existingByKey is the upstream set we're reconciling
+			// against; the create is a NEW record, not a leftover.
+			// Adding it would trip the prune sweep below and delete
+			// the record we just created.
+		}
+	}
+
+	// Prune: any candidates still in existingByKey after both passes
+	// are upstream records that no longer appear in the desired config.
+	// Delete them so the upstream zone converges to the declared set.
+	// (Hover has no whole-zone replace API; this per-record delete is
+	// the only path to convergence.)
+	for _, leftovers := range existingByKey {
+		for _, orphan := range leftovers {
+			if err := d.client.DeleteRecord(ctx, orphan.ID); err != nil {
+				return fmt.Errorf("hover dns prune %s/%s %q (id=%s): %w", orphan.Type, orphan.Name, domain, orphan.ID, err)
 			}
 		}
 	}

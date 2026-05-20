@@ -74,15 +74,10 @@ against [RFC 6238 Appendix B vectors](https://datatracker.ietf.org/doc/html/rfc6
 
 ## Limitations
 
-- **No prune on apply**: `upsertRecords` only adds/updates. Records
-  that exist upstream but are not in the desired config are NOT
-  deleted on `apply`. `Diff` does flag them (so Plan reports drift),
-  but converging the actual record set requires manually deleting
-  the orphan records via Hover's UI or via a future explicit prune
-  path. Track follow-up via the project issue list.
 - **No zone delete**: Hover exposes no API to drop a DNS zone.
   Resource `Delete` is a no-op — the IaC state is cleared but
-  upstream records remain.
+  upstream records remain. Operators who want to drop the zone
+  must do so manually via Hover's UI.
 
 ## Development
 

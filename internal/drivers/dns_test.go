@@ -531,3 +531,54 @@ func TestDiff_EmptyDesired_WithCurrentRecords_NeedsUpdate(t *testing.T) {
 		t.Error("expected NeedsUpdate=true when desired is empty but current has records")
 	}
 }
+
+// TestUpsertRecords_PrunesExtraRecords verifies that records in the
+// upstream zone that don't appear in the desired config are deleted
+// during apply. Regresses the "no prune on apply" gap that left
+// removed records as orphans upstream.
+func TestUpsertRecords_PrunesExtraRecords(t *testing.T) {
+	fc := &fakeClient{
+		records: []hover.DNSRecord{
+			{ID: "r1", Type: "A", Name: "@", Content: "1.1.1.1"},
+			{ID: "r2", Type: "A", Name: "www", Content: "1.1.1.1"}, // orphan
+		},
+	}
+	d := NewDNSDriverWithClient(fc)
+	spec := interfaces.ResourceSpec{
+		Name: "example.com", Type: "infra.dns",
+		Config: map[string]any{
+			"records": []any{
+				map[string]any{"type": "A", "name": "@", "content": "1.1.1.1"},
+			},
+		},
+	}
+	if _, err := d.Update(context.Background(), interfaces.ResourceRef{Name: "example.com", ProviderID: "example.com"}, spec); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if len(fc.records) != 1 {
+		t.Fatalf("expected upstream to converge to 1 record after prune; got %d: %+v", len(fc.records), fc.records)
+	}
+	if fc.records[0].Name != "@" {
+		t.Errorf("expected the apex record to remain; got %+v", fc.records[0])
+	}
+}
+
+func TestUpsertRecords_EmptyDesiredDeletesAll(t *testing.T) {
+	fc := &fakeClient{
+		records: []hover.DNSRecord{
+			{ID: "r1", Type: "A", Name: "@", Content: "1.1.1.1"},
+			{ID: "r2", Type: "A", Name: "www", Content: "1.1.1.1"},
+		},
+	}
+	d := NewDNSDriverWithClient(fc)
+	spec := interfaces.ResourceSpec{
+		Name: "example.com", Type: "infra.dns",
+		Config: map[string]any{"records": []any{}},
+	}
+	if _, err := d.Update(context.Background(), interfaces.ResourceRef{Name: "example.com", ProviderID: "example.com"}, spec); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if len(fc.records) != 0 {
+		t.Errorf("expected all upstream records pruned; got %d: %+v", len(fc.records), fc.records)
+	}
+}
