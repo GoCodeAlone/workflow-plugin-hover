@@ -9,9 +9,17 @@
 //   - NO structpb.Struct on the wire; config / outputs cross as JSON bytes.
 //   - ComputePlanVersion "v2" (Apply is removed; FinalizeApply returns empty
 //     since Hover has no deferred operations).
-//   - Only the Required + Drift services are registered; Optional services
-//     that Hover cannot satisfy (state backend, sizing, migration repair,
-//     enumeration) are left as Unimplemented.
+//   - sdk.ServeIaCPlugin auto-registers every typed pb.IaCProvider*Server
+//     interface this struct satisfies (see internal/serve.go). hoverIaCServer
+//     embeds pb.Unimplemented*Server for the full surface
+//     (Required + Finalizer + DriftDetector + Enumerator + Validator +
+//     DriftConfigDetector + CredentialRevoker + MigrationRepairer +
+//     ResourceDriver + PluginService), so every service registers — but
+//     Hover only implements method bodies for Required + Finalizer +
+//     DriftDetector. The unimplemented services respond with a typed
+//     "Unimplemented" gRPC status rather than "service not registered",
+//     which is the right shape for cross-plugin uniformity but means
+//     clients must check capabilities before invoking optional methods.
 package internal
 
 import (

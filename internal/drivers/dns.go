@@ -188,7 +188,7 @@ func (d *DNSDriver) Diff(_ context.Context, desired interfaces.ResourceSpec, cur
 	// are not in the desired set. Treat that as drift so the engine
 	// surfaces it during Plan, even though upsertRecords does not
 	// currently prune the extras (an explicit prune path is a
-	// separate follow-up; see README "Replace semantics" caveat).
+	// separate follow-up; see the "Limitations" section of README.md).
 	for _, leftover := range currentByKey {
 		if len(leftover) > 0 {
 			return &interfaces.DiffResult{NeedsUpdate: true}, nil
@@ -248,15 +248,47 @@ func (d *DNSDriver) upsertRecords(ctx context.Context, domain string, desired []
 		existingByKey[key] = append(existingByKey[key], r)
 	}
 
+	// Two-pass match. First pass: skip any desired record that ALREADY
+	// has an exact-content (and TTL when specified) match upstream —
+	// no work needed. Consume those candidates so they can't be
+	// re-used by the update pass. Second pass: every remaining
+	// desired record either updates a leftover same-key candidate
+	// (Content/TTL change on an existing record) or creates a new one.
+	//
+	// Without this two-pass split the previous code matched
+	// candidates[0] every time and could update one record's content
+	// to a value that another already-fine record holds — producing
+	// a transient state with two identical records. Diff would still
+	// converge eventually, but apply would do unnecessary writes and
+	// could fail under multi-record configs.
+	deferredUpdates := make([]hover.DNSRecord, 0, len(desired))
 	for _, dr := range desired {
+		key := recordKey(dr.Type, dr.Name)
+		candidates := existingByKey[key]
+		matched := -1
+		for i, c := range candidates {
+			if c.Content != dr.Content {
+				continue
+			}
+			if dr.TTL != 0 && c.TTL != dr.TTL {
+				continue
+			}
+			matched = i
+			break
+		}
+		if matched >= 0 {
+			existingByKey[key] = append(candidates[:matched], candidates[matched+1:]...)
+			continue
+		}
+		deferredUpdates = append(deferredUpdates, dr)
+	}
+
+	for _, dr := range deferredUpdates {
 		key := recordKey(dr.Type, dr.Name)
 		candidates := existingByKey[key]
 		if len(candidates) > 0 {
 			ex := candidates[0]
 			existingByKey[key] = candidates[1:]
-			if ex.Content == dr.Content && (dr.TTL == 0 || ex.TTL == dr.TTL) {
-				continue // already matches
-			}
 			if err := d.client.UpdateRecord(ctx, ex.ID, dr); err != nil {
 				return fmt.Errorf("hover dns update %s/%s %q: %w", dr.Type, dr.Name, domain, err)
 			}
@@ -266,8 +298,7 @@ func (d *DNSDriver) upsertRecords(ctx context.Context, domain string, desired []
 				return fmt.Errorf("hover dns create %s/%s %q: %w", dr.Type, dr.Name, domain, err)
 			}
 			if created != nil {
-				key2 := recordKey(created.Type, created.Name)
-				existingByKey[key2] = append(existingByKey[key2], *created)
+				existingByKey[key] = append(existingByKey[key], *created)
 			}
 		}
 	}
