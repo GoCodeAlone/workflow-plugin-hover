@@ -3,6 +3,7 @@ package drivers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/GoCodeAlone/workflow-plugin-hover/internal/hover"
@@ -171,7 +172,16 @@ func TestDelegationDriver_Update_HappyPath(t *testing.T) {
 	if fc.lastSetNS[0] != "ns3.do.com" {
 		t.Errorf("first NS = %q", fc.lastSetNS[0])
 	}
-	_ = out
+	// Defend the structpb-safe invariant on the Update path too:
+	// Outputs["nameservers"] MUST be []any, not []string (would
+	// reject structpb.NewStruct at the gRPC boundary).
+	nsRaw, ok := out.Outputs["nameservers"]
+	if !ok {
+		t.Fatal("Update Outputs.nameservers missing")
+	}
+	if _, ok := nsRaw.([]any); !ok {
+		t.Fatalf("Update Outputs.nameservers = %T, want []any", nsRaw)
+	}
 }
 
 func TestDelegationDriver_Update_DomainRenameRejected(t *testing.T) {
@@ -356,5 +366,30 @@ func TestDelegationDriver_CtxCanceled_AllMethods(t *testing.T) {
 	}
 	if err := d.Delete(ctx, ref); err == nil {
 		t.Error("Delete: expected error for canceled ctx")
+	}
+	// HealthCheck returns (result, nil) on cancellation rather than
+	// surfacing err — the result's Healthy flag carries the signal.
+	if res, err := d.HealthCheck(ctx, ref); err != nil {
+		t.Errorf("HealthCheck: unexpected err for canceled ctx: %v", err)
+	} else if res.Healthy {
+		t.Error("HealthCheck: Healthy=true for canceled ctx; expected unhealthy")
+	}
+}
+
+func TestDelegationDriver_Read_PropagatesErrEmptyNameservers(t *testing.T) {
+	// Callers using errors.Is(driverErr, hover.ErrEmptyNameservers) to
+	// distinguish "Hover surfaced 0 nameservers" from other failures need
+	// the sentinel to survive the driver's error wrap. This test defends
+	// that contract.
+	fc := &fakeDelegationClient{
+		getErr: fmt.Errorf("hover: GetDomainDelegation %q: %w", "example.com", hover.ErrEmptyNameservers),
+	}
+	d := NewDelegationDriverWithClient(fc)
+	_, err := d.Read(context.Background(), interfaces.ResourceRef{Name: "example.com", ProviderID: "example.com"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, hover.ErrEmptyNameservers) {
+		t.Errorf("errors.Is should match hover.ErrEmptyNameservers through driver wrap; got %v", err)
 	}
 }
