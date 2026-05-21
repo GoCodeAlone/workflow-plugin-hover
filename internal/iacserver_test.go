@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/GoCodeAlone/workflow/interfaces"
 	pb "github.com/GoCodeAlone/workflow/plugin/external/proto"
 )
 
@@ -106,6 +107,57 @@ func TestHoverIaCServer_Plan_EmptyDesired(t *testing.T) {
 	}
 }
 
+func TestHoverIaCServer_ResourceDriverReadAndDiff(t *testing.T) {
+	driver := &iacServerFakeDriver{
+		readOut: &interfaces.ResourceOutput{
+			Name:       "delegation",
+			Type:       "infra.dns_delegation",
+			ProviderID: "gocodealone.tech",
+			Outputs:    map[string]any{"nameservers": []any{"ns1.digitalocean.com"}},
+			Status:     "active",
+		},
+		diff: &interfaces.DiffResult{NeedsUpdate: false},
+	}
+	srv := &hoverIaCServer{
+		provider: &HoverProvider{drivers: map[string]interfaces.ResourceDriver{
+			"infra.dns_delegation": driver,
+		}},
+	}
+
+	readResp, err := srv.Read(context.Background(), &pb.ResourceReadRequest{
+		ResourceType: "infra.dns_delegation",
+		Ref:          &pb.ResourceRef{Name: "delegation", Type: "infra.dns_delegation", ProviderId: "gocodealone.tech"},
+	})
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if readResp.GetOutput().GetProviderId() != "gocodealone.tech" {
+		t.Fatalf("Read ProviderID = %q, want gocodealone.tech", readResp.GetOutput().GetProviderId())
+	}
+	if driver.readRef.ProviderID != "gocodealone.tech" {
+		t.Fatalf("driver read ref = %+v, want provider id gocodealone.tech", driver.readRef)
+	}
+
+	diffResp, err := srv.Diff(context.Background(), &pb.ResourceDiffRequest{
+		ResourceType: "infra.dns_delegation",
+		Desired: &pb.ResourceSpec{
+			Name:       "delegation",
+			Type:       "infra.dns_delegation",
+			ConfigJson: []byte(`{"domain":"gocodealone.tech"}`),
+		},
+		Current: readResp.GetOutput(),
+	})
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	if diffResp.GetResult().GetNeedsUpdate() {
+		t.Fatal("Diff NeedsUpdate = true, want false")
+	}
+	if driver.diffDesired.Config["domain"] != "gocodealone.tech" {
+		t.Fatalf("driver diff desired config = %+v", driver.diffDesired.Config)
+	}
+}
+
 func TestHoverIaCServer_Destroy_EmptyRefs(t *testing.T) {
 	srv := NewIaCServer()
 	// Destroy with zero refs is a no-op regardless of initialization state.
@@ -117,3 +169,42 @@ func TestHoverIaCServer_Destroy_EmptyRefs(t *testing.T) {
 		t.Errorf("expected no destroyed, got %v", resp.GetResult().GetDestroyed())
 	}
 }
+
+type iacServerFakeDriver struct {
+	readOut     *interfaces.ResourceOutput
+	readRef     interfaces.ResourceRef
+	diff        *interfaces.DiffResult
+	diffDesired interfaces.ResourceSpec
+	diffCurrent *interfaces.ResourceOutput
+}
+
+func (d *iacServerFakeDriver) Create(_ context.Context, spec interfaces.ResourceSpec) (*interfaces.ResourceOutput, error) {
+	return &interfaces.ResourceOutput{Name: spec.Name, Type: spec.Type, ProviderID: spec.Name}, nil
+}
+
+func (d *iacServerFakeDriver) Read(_ context.Context, ref interfaces.ResourceRef) (*interfaces.ResourceOutput, error) {
+	d.readRef = ref
+	return d.readOut, nil
+}
+
+func (d *iacServerFakeDriver) Update(_ context.Context, ref interfaces.ResourceRef, spec interfaces.ResourceSpec) (*interfaces.ResourceOutput, error) {
+	return &interfaces.ResourceOutput{Name: spec.Name, Type: spec.Type, ProviderID: ref.ProviderID}, nil
+}
+
+func (d *iacServerFakeDriver) Delete(_ context.Context, _ interfaces.ResourceRef) error { return nil }
+
+func (d *iacServerFakeDriver) Diff(_ context.Context, desired interfaces.ResourceSpec, current *interfaces.ResourceOutput) (*interfaces.DiffResult, error) {
+	d.diffDesired = desired
+	d.diffCurrent = current
+	return d.diff, nil
+}
+
+func (d *iacServerFakeDriver) HealthCheck(_ context.Context, _ interfaces.ResourceRef) (*interfaces.HealthResult, error) {
+	return &interfaces.HealthResult{Healthy: true}, nil
+}
+
+func (d *iacServerFakeDriver) Scale(_ context.Context, ref interfaces.ResourceRef, _ int) (*interfaces.ResourceOutput, error) {
+	return &interfaces.ResourceOutput{Name: ref.Name, Type: ref.Type, ProviderID: ref.ProviderID}, nil
+}
+
+func (d *iacServerFakeDriver) SensitiveKeys() []string { return nil }
