@@ -13,11 +13,13 @@ import (
 type fakeDelegationClient struct {
 	getResult *hover.DomainDelegation
 	getErr    error
+	getCalls  int
 	setErr    error
 	lastSetNS []string
 }
 
 func (f *fakeDelegationClient) GetDomainDelegation(_ context.Context, _ string) (*hover.DomainDelegation, error) {
+	f.getCalls++
 	return f.getResult, f.getErr
 }
 
@@ -137,6 +139,28 @@ func TestDelegationDriver_Read_HappyPath(t *testing.T) {
 	ns, _ := out.Outputs["nameservers"].([]any)
 	if len(ns) != 2 {
 		t.Errorf("nameservers len = %d", len(ns))
+	}
+}
+
+func TestDelegationDriver_Read_UsesPublicNSBeforeHoverLogin(t *testing.T) {
+	fc := &fakeDelegationClient{getErr: errors.New("hover login should not be needed")}
+	d := NewDelegationDriverWithClientAndResolver(fc, func(_ context.Context, domain string) ([]string, error) {
+		if domain != "example.com" {
+			t.Fatalf("resolver domain = %q, want example.com", domain)
+		}
+		return []string{"ns1.digitalocean.com.", "ns2.digitalocean.com.", "ns3.digitalocean.com."}, nil
+	})
+
+	out, err := d.Read(context.Background(), interfaces.ResourceRef{Name: "example.com", ProviderID: "example.com"})
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if fc.getCalls != 0 {
+		t.Fatalf("GetDomainDelegation called %d times; public NS should avoid Hover login", fc.getCalls)
+	}
+	ns, _ := out.Outputs["nameservers"].([]any)
+	if len(ns) != 3 || ns[0] != "ns1.digitalocean.com" {
+		t.Fatalf("nameservers = %#v", ns)
 	}
 }
 

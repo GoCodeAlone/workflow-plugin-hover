@@ -5,6 +5,7 @@ package drivers
 import (
 	"context"
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 
@@ -28,18 +29,25 @@ type HoverDelegationClient interface {
 // [ns1.hover.com, ns2.hover.com]; restore-from-stash is deferred to
 // v0.3.0 because interfaces.ResourceRef has no state channel.
 type DelegationDriver struct {
-	client HoverDelegationClient
+	client     HoverDelegationClient
+	nsResolver func(context.Context, string) ([]string, error)
 }
 
 // NewDelegationDriver returns a DelegationDriver bound to a real *hover.Client.
 func NewDelegationDriver(c *hover.Client) *DelegationDriver {
-	return &DelegationDriver{client: c}
+	return &DelegationDriver{client: c, nsResolver: lookupPublicNameservers}
 }
 
 // NewDelegationDriverWithClient returns a DelegationDriver bound to an
 // injected client; used by tests.
 func NewDelegationDriverWithClient(c HoverDelegationClient) *DelegationDriver {
 	return &DelegationDriver{client: c}
+}
+
+// NewDelegationDriverWithClientAndResolver returns a DelegationDriver bound
+// to an injected client and public-NS resolver; used by tests.
+func NewDelegationDriverWithClientAndResolver(c HoverDelegationClient, resolver func(context.Context, string) ([]string, error)) *DelegationDriver {
+	return &DelegationDriver{client: c, nsResolver: resolver}
 }
 
 func (d *DelegationDriver) Type() string { return "infra.dns_delegation" }
@@ -105,9 +113,13 @@ func parseDelegationSpec(spec interfaces.ResourceSpec) (dnsDelegationSpec, error
 func nameserversToAny(ns []string) []any {
 	out := make([]any, len(ns))
 	for i, s := range ns {
-		out[i] = s
+		out[i] = normalizeNameserverHost(s)
 	}
 	return out
+}
+
+func normalizeNameserverHost(host string) string {
+	return strings.TrimSuffix(strings.TrimSpace(host), ".")
 }
 
 // delegationOutput builds the ResourceOutput for a Create/Update result.
@@ -154,11 +166,32 @@ func (d *DelegationDriver) Read(ctx context.Context, ref interfaces.ResourceRef)
 	if domain == "" {
 		domain = ref.Name
 	}
+	if d.nsResolver != nil {
+		if ns, err := d.nsResolver(ctx, domain); err == nil && len(ns) > 0 {
+			return delegationOutput(ref.Name, domain, ns), nil
+		}
+	}
 	dom, err := d.client.GetDomainDelegation(ctx, domain)
 	if err != nil {
 		return nil, fmt.Errorf("dns_delegation read %q: %w", ref.Name, err)
 	}
 	return delegationOutput(ref.Name, domain, dom.Nameservers), nil
+}
+
+func lookupPublicNameservers(ctx context.Context, domain string) ([]string, error) {
+	resolver := net.DefaultResolver
+	records, err := resolver.LookupNS(ctx, domain)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(records))
+	for _, record := range records {
+		host := normalizeNameserverHost(record.Host)
+		if host != "" {
+			out = append(out, host)
+		}
+	}
+	return out, nil
 }
 
 // Update replaces the registrar nameservers. Rejects in-place domain
