@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // signinCSRFHTML is what we return on GET /signin + /signin/totp so
@@ -358,6 +359,21 @@ func TestClient_DeleteRecord(t *testing.T) {
 	}
 	if !strings.HasSuffix(deletedPath, "/r1") {
 		t.Errorf("deletedPath = %q; want suffix /r1", deletedPath)
+	}
+}
+
+func TestEnsureLoginLocked_CallableUnderHeldLock(t *testing.T) {
+	// Build a Client with a fresh loggedAt so ensureLoginLocked
+	// short-circuits without making HTTP calls.
+	c, err := NewClient(Credentials{Username: "u", Password: "p"}, nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	c.loggedAt = time.Now() // skip the actual login
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.ensureLoginLocked(context.Background()); err != nil {
+		t.Errorf("ensureLoginLocked under held mu: %v", err)
 	}
 }
 

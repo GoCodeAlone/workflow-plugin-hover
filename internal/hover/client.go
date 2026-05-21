@@ -79,9 +79,20 @@ func (c *Client) Login(ctx context.Context) error {
 
 // ensureLogin re-authenticates iff the session is stale. Safe to call
 // before every API hit; idempotent within sessionStaleAfter.
+//
+// Acquires c.mu internally. Callers that already hold the lock must
+// call ensureLoginLocked instead.
 func (c *Client) ensureLogin(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.ensureLoginLocked(ctx)
+}
+
+// ensureLoginLocked is the implementation of ensureLogin without the lock
+// acquisition. Caller MUST hold c.mu. Used by SetNameservers which holds
+// c.mu across the full auth → CSRF → PUT sequence to eliminate the
+// TOCTOU window between auth-check and PUT.
+func (c *Client) ensureLoginLocked(ctx context.Context) error {
 	if !c.loggedAt.IsZero() && time.Since(c.loggedAt) < sessionStaleAfter {
 		return nil
 	}
