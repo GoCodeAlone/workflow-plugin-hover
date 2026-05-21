@@ -35,7 +35,7 @@ func NewHoverProvider() *HoverProvider { return &HoverProvider{} }
 func (p *HoverProvider) Name() string    { return "hover" }
 func (p *HoverProvider) Version() string { return Version }
 
-// Initialize parses provider config and eagerly authenticates with Hover.
+// Initialize parses provider config and constructs a lazy Hover client.
 // Required keys:
 //
 //	username     — Hover account username / email
@@ -74,12 +74,6 @@ func (p *HoverProvider) Initialize(ctx context.Context, config map[string]any) e
 	c, err := hover.NewClient(creds, nil)
 	if err != nil {
 		return fmt.Errorf("hover: client init: %w", err)
-	}
-
-	// Eager login so config errors (bad creds, MFA failure) surface at
-	// Configure time rather than at first Plan/Apply invocation.
-	if err := c.Login(ctx); err != nil {
-		return fmt.Errorf("hover: initial login failed: %w", err)
 	}
 
 	p.client = c
