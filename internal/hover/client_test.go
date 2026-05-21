@@ -123,6 +123,59 @@ func TestClient_Login_NoMFA(t *testing.T) {
 	}
 }
 
+func TestClient_Login_UsesBrowserSigninShape(t *testing.T) {
+	var authBody map[string]any
+	var headers http.Header
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/signin/auth.json" {
+			t.Errorf("unexpected hit: %s %s", r.Method, r.URL.Path)
+			return
+		}
+		headers = r.Header.Clone()
+		if err := json.NewDecoder(r.Body).Decode(&authBody); err != nil {
+			t.Errorf("decode auth body: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "completed"})
+	})
+	defer srv.Close()
+
+	if err := c.Login(context.Background()); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	if _, ok := authBody["token"]; !ok {
+		t.Fatalf("auth body missing token field: %#v", authBody)
+	}
+	if got := headers.Get("Origin"); got != hoverHost {
+		t.Errorf("Origin = %q, want %q", got, hoverHost)
+	}
+	if got := headers.Get("Referer"); got != hoverHost+"/signin" {
+		t.Errorf("Referer = %q, want %q", got, hoverHost+"/signin")
+	}
+	if got := headers.Get("X-Requested-With"); got != "XMLHttpRequest" {
+		t.Errorf("X-Requested-With = %q, want XMLHttpRequest", got)
+	}
+	if got := headers.Get("User-Agent"); !strings.Contains(got, "Mozilla/5.0") {
+		t.Errorf("User-Agent = %q, want browser-like UA", got)
+	}
+}
+
+func TestNewClient_NormalizesPastedSecretNewlines(t *testing.T) {
+	c, err := NewClient(Credentials{
+		Username: " alice@example.com \r\n",
+		Password: "pw\r\n",
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if c.creds.Username != "alice@example.com" {
+		t.Errorf("username = %q, want trimmed address", c.creds.Username)
+	}
+	if c.creds.Password != "pw" {
+		t.Errorf("password = %q, want newline-trimmed password", c.creds.Password)
+	}
+}
+
 func TestClient_Login_SkipsWhenFresh(t *testing.T) {
 	var hits int
 	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {

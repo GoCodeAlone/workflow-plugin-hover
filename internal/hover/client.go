@@ -18,7 +18,7 @@ import (
 
 const (
 	hoverHost         = "https://www.hover.com"
-	defaultUserAgent  = "wfctl-hover-plugin/0.1 (+https://github.com/GoCodeAlone/workflow-plugin-hover)"
+	defaultUserAgent  = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 	sessionStaleAfter = 1 * time.Hour
 )
 
@@ -42,6 +42,8 @@ type Client struct {
 // NewClient returns a fresh Client. Pass http=nil for an internal
 // jar-backed http.Client. Tests inject a stub to redirect requests.
 func NewClient(creds Credentials, httpClient *http.Client) (*Client, error) {
+	creds.Username = strings.TrimSpace(creds.Username)
+	creds.Password = strings.TrimRight(creds.Password, "\r\n")
 	if creds.Username == "" || creds.Password == "" {
 		return nil, errors.New("hover: username + password required")
 	}
@@ -100,6 +102,7 @@ func (c *Client) ensureLoginLocked(ctx context.Context) error {
 		"username": c.creds.Username,
 		"password": c.creds.Password,
 		"remember": false,
+		"token":    "",
 	})
 	if err != nil {
 		return fmt.Errorf("hover signin step 1: %w", err)
@@ -192,7 +195,10 @@ func (c *Client) postLoginJSON(ctx context.Context, urlStr string, payload map[s
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
+	req.Header.Set("Origin", hoverHost)
+	req.Header.Set("Referer", hoverHost+"/signin")
 	req.Header.Set("User-Agent", c.UserAgent)
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return signinResponse{}, err
