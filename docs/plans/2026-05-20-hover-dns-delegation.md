@@ -32,7 +32,7 @@
 |------|-------|-------|--------|
 | 1 | feat: infra.dns_delegation resource type (v0.2.0) | Task 1, Task 2, Task 3, Task 4, Task 5, Task 6, Task 7, Task 8, Task 9, Task 10, Task 11, Task 12, Task 13 | feat/dns-delegation |
 
-**Status:** Draft
+**Status:** Locked 2026-05-21T01:00:33Z
 
 ---
 
