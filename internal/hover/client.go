@@ -333,10 +333,20 @@ func (c *Client) GetDomainDelegation(ctx context.Context, domainName string) (*D
 // between the two requests).
 //
 // Trade-off: any concurrent caller using the same *Client blocks for
-// up to ~60s (two HTTP round-trips under the 30s default client timeout).
-// Acceptable for the field-test scope (single goroutine, one delegation
-// resource). Future: cache CSRF at session granularity if mixed-resource
-// throughput becomes a concern.
+// the full duration of the held-lock sequence. Worst case (session is
+// stale and re-auth fires inside ensureLoginLocked):
+//   - GET /signin (CSRF for the form)
+//   - POST /signin (credentials)
+//   - GET /signin/totp (MFA probe)
+//   - POST /signin/totp (TOTP code, only if MFA enabled)
+//   - GET /control_panel/domain/<name> (CSRF for the API write)
+//   - PUT /api/control_panel/domains/domain-<name>
+//
+// Up to ~180s at the 30s default per-request timeout when re-auth is
+// needed; ~60s on the warm-session path (CSRF GET + PUT). Acceptable
+// for the field-test scope (single goroutine, one delegation
+// resource). Future: cache CSRF at session granularity if
+// mixed-resource throughput becomes a concern.
 func (c *Client) SetNameservers(ctx context.Context, domainName string, ns []string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

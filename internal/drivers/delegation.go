@@ -270,12 +270,23 @@ func sameNameserverSet(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	sa := append([]string(nil), a...)
-	sb := append([]string(nil), b...)
+	// Normalize to lowercase before sorting so the pairwise sort
+	// positions are consistent with the EqualFold comparison.
+	// Without normalize-then-sort, ["NS.foo"] sorts before ["ns.bar"]
+	// case-sensitively but the case-insensitive compare expects the
+	// reverse — causing two case-equal multisets to falsely diverge.
+	sa := make([]string, len(a))
+	sb := make([]string, len(b))
+	for i, s := range a {
+		sa[i] = strings.ToLower(s)
+	}
+	for i, s := range b {
+		sb[i] = strings.ToLower(s)
+	}
 	sort.Strings(sa)
 	sort.Strings(sb)
 	for i := range sa {
-		if !strings.EqualFold(sa[i], sb[i]) {
+		if sa[i] != sb[i] {
 			return false
 		}
 	}

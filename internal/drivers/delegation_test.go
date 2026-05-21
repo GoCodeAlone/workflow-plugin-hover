@@ -410,3 +410,31 @@ func TestDelegationDriver_Create_CaseInsensitiveDuplicate_Rejected(t *testing.T)
 		t.Fatal("expected error for case-insensitive duplicate nameservers")
 	}
 }
+
+func TestDelegationDriver_Diff_CaseInsensitiveMatch(t *testing.T) {
+	// Same hostnames in different cases must match (DNS is
+	// case-insensitive). Regresses a sort-vs-EqualFold sequencing
+	// bug where mixed-case multisets could falsely diverge.
+	d := NewDelegationDriverWithClient(&fakeDelegationClient{})
+	spec := interfaces.ResourceSpec{
+		Name: "example.com", Type: "infra.dns_delegation",
+		Config: map[string]any{
+			"domain":      "example.com",
+			"nameservers": []any{"NS1.example.com", "ns2.example.com"},
+		},
+	}
+	current := &interfaces.ResourceOutput{
+		ProviderID: "example.com",
+		Outputs: map[string]any{
+			"domain":      "example.com",
+			"nameservers": []any{"ns1.EXAMPLE.com", "NS2.example.com"},
+		},
+	}
+	res, err := d.Diff(context.Background(), spec, current)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	if res.NeedsUpdate {
+		t.Error("expected NeedsUpdate=false; case-only diff is no-op")
+	}
+}
