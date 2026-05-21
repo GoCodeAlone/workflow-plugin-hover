@@ -1,6 +1,6 @@
 {
   "name": "workflow-plugin-hover",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Hover DNS provider (browser-style login + TOTP, no official SDK)",
   "author": "GoCodeAlone",
   "license": "MIT",
