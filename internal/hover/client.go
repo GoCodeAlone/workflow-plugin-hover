@@ -288,6 +288,41 @@ type Domain struct {
 	Records []DNSRecord `json:"entries"`
 }
 
+// GetDomainDelegation fetches the registrar-level nameserver delegation for
+// the named domain via the control-panel API (same endpoint family as the
+// PUT used by SetNameservers — more likely to surface nameservers reliably
+// than the DNS-records-oriented /api/domains/<name>/dns endpoint).
+//
+// Returns ErrEmptyNameservers if the parsed response has zero nameservers.
+// This loud-on-empty behavior is intentional: it converts the silent
+// re-apply thrash failure mode (empty → Diff says NeedsUpdate forever)
+// into a single-iteration error visible at first wfctl plan.
+func (c *Client) GetDomainDelegation(ctx context.Context, domainName string) (*DomainDelegation, error) {
+	if err := c.ensureLogin(ctx); err != nil {
+		return nil, err
+	}
+	endpoint := fmt.Sprintf("%s/api/control_panel/domains/domain-%s", hoverHost, url.PathEscape(domainName))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req.Header.Set("User-Agent", c.UserAgent)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("hover: GetDomainDelegation %q: %w", domainName, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("hover: GetDomainDelegation %q: HTTP %d: %s", domainName, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var d DomainDelegation
+	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+		return nil, fmt.Errorf("hover: GetDomainDelegation %q: decode: %w", domainName, err)
+	}
+	if len(d.Nameservers) == 0 {
+		return nil, fmt.Errorf("hover: GetDomainDelegation %q: %w", domainName, ErrEmptyNameservers)
+	}
+	return &d, nil
+}
+
 // GetDomain returns the full Domain struct (including the
 // hover-assigned ID) for the named zone. The ID is required when
 // creating new records via CreateRecord; the human-readable name is

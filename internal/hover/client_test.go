@@ -430,6 +430,54 @@ func TestFetchControlPanelCSRFLocked_Non2xx(t *testing.T) {
 	}
 }
 
+func TestGetDomainDelegation_HappyPath(t *testing.T) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/control_panel/domains/domain-example.com" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"id":"domain-example.com","domain_name":"example.com","nameservers":["ns1.do.com","ns2.do.com"]}`))
+	})
+	defer srv.Close()
+	c.loggedAt = time.Now()
+
+	dom, err := c.GetDomainDelegation(context.Background(), "example.com")
+	if err != nil {
+		t.Fatalf("GetDomainDelegation: %v", err)
+	}
+	if dom.ID != "domain-example.com" {
+		t.Errorf("ID = %q", dom.ID)
+	}
+	if len(dom.Nameservers) != 2 {
+		t.Errorf("Nameservers len = %d, want 2", len(dom.Nameservers))
+	}
+}
+
+func TestGetDomainDelegation_EmptyNameserversReturnsSentinel(t *testing.T) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"domain-example.com","domain_name":"example.com","nameservers":[]}`))
+	})
+	defer srv.Close()
+	c.loggedAt = time.Now()
+
+	_, err := c.GetDomainDelegation(context.Background(), "example.com")
+	if !errors.Is(err, ErrEmptyNameservers) {
+		t.Fatalf("want ErrEmptyNameservers, got %v", err)
+	}
+}
+
+func TestGetDomainDelegation_Non2xx(t *testing.T) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	})
+	defer srv.Close()
+	c.loggedAt = time.Now()
+
+	_, err := c.GetDomainDelegation(context.Background(), "example.com")
+	if err == nil {
+		t.Fatal("expected error on 404")
+	}
+}
+
 func TestDomainDelegation_JSONShape(t *testing.T) {
 	// Tentative envelope per design A6: flat object, not wrapped.
 	body := `{"id":"domain-example.com","domain_name":"example.com","nameservers":["a.com","b.com"]}`
