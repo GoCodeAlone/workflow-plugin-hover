@@ -1,6 +1,7 @@
 package hover
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -321,6 +322,62 @@ func (c *Client) GetDomainDelegation(ctx context.Context, domainName string) (*D
 		return nil, fmt.Errorf("hover: GetDomainDelegation %q: %w", domainName, ErrEmptyNameservers)
 	}
 	return &d, nil
+}
+
+// SetNameservers updates the registrar-level nameservers for a domain via
+// Hover's control-panel API.
+//
+// Lock discipline: holds c.mu for the entire auth → CSRF fetch → PUT
+// sequence. This eliminates the TOCTOU window between auth-check and
+// PUT (another goroutine cannot re-auth and invalidate the CSRF token
+// between the two requests).
+//
+// Trade-off: any concurrent caller using the same *Client blocks for
+// up to ~60s (two HTTP round-trips under the 30s default client timeout).
+// Acceptable for the field-test scope (single goroutine, one delegation
+// resource). Future: cache CSRF at session granularity if mixed-resource
+// throughput becomes a concern.
+func (c *Client) SetNameservers(ctx context.Context, domainName string, ns []string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.ensureLoginLocked(ctx); err != nil {
+		return err
+	}
+	csrf, err := c.fetchControlPanelCSRFLocked(ctx, domainName)
+	if err != nil {
+		return err
+	}
+	return c.putNameserversLocked(ctx, domainName, ns, csrf)
+}
+
+// putNameserversLocked PUTs the nameservers list. Caller MUST hold c.mu.
+//
+// Note: the wire payload uses []string directly — encoding/json serializes
+// it as a JSON array, which is what Hover expects. This is distinct from
+// the []any requirement in ResourceOutput.Outputs (which crosses the
+// structpb gRPC boundary); typed slices are fine here because the wire
+// format is plain JSON, not structpb.
+func (c *Client) putNameserversLocked(ctx context.Context, domainName string, ns []string, csrf string) error {
+	endpoint := fmt.Sprintf("%s/api/control_panel/domains/domain-%s", hoverHost, url.PathEscape(domainName))
+	payload := map[string]any{"field": "nameservers", "value": ns}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("hover: SetNameservers %q: marshal: %w", domainName, err)
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", c.UserAgent)
+	req.Header.Set("X-CSRF-Token", csrf)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("hover: SetNameservers %q: %w", domainName, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("hover: SetNameservers %q: HTTP %d: %s", domainName, resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	return nil
 }
 
 // GetDomain returns the full Domain struct (including the

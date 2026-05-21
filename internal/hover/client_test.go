@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -475,6 +476,69 @@ func TestGetDomainDelegation_Non2xx(t *testing.T) {
 	_, err := c.GetDomainDelegation(context.Background(), "example.com")
 	if err == nil {
 		t.Fatal("expected error on 404")
+	}
+}
+
+func TestSetNameservers_PUTShape(t *testing.T) {
+	var capturedURL, capturedToken, capturedCT string
+	var capturedBody []byte
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/control_panel/domain/example.com":
+			_, _ = w.Write([]byte(`<meta name="csrf-token" content="test-csrf-token">`))
+		case "/api/control_panel/domains/domain-example.com":
+			capturedURL = r.URL.Path
+			capturedToken = r.Header.Get("X-CSRF-Token")
+			capturedCT = r.Header.Get("Content-Type")
+			capturedBody, _ = io.ReadAll(r.Body)
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+	})
+	defer srv.Close()
+	c.loggedAt = time.Now()
+
+	err := c.SetNameservers(context.Background(), "example.com", []string{"a.com", "b.com"})
+	if err != nil {
+		t.Fatalf("SetNameservers: %v", err)
+	}
+	if capturedURL != "/api/control_panel/domains/domain-example.com" {
+		t.Errorf("URL = %q", capturedURL)
+	}
+	if capturedToken != "test-csrf-token" {
+		t.Errorf("X-CSRF-Token = %q", capturedToken)
+	}
+	if !strings.HasPrefix(capturedCT, "application/json") {
+		t.Errorf("Content-Type = %q", capturedCT)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(capturedBody, &payload); err != nil {
+		t.Fatalf("body decode: %v", err)
+	}
+	if payload["field"] != "nameservers" {
+		t.Errorf("field = %v", payload["field"])
+	}
+	val, _ := payload["value"].([]any)
+	if len(val) != 2 || val[0] != "a.com" || val[1] != "b.com" {
+		t.Errorf("value = %v, want [a.com b.com]", payload["value"])
+	}
+}
+
+func TestSetNameservers_Non2xxPUT(t *testing.T) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/control_panel/domain/") {
+			_, _ = w.Write([]byte(`<meta name="csrf-token" content="t">`))
+			return
+		}
+		http.Error(w, "bad token", http.StatusUnprocessableEntity)
+	})
+	defer srv.Close()
+	c.loggedAt = time.Now()
+
+	err := c.SetNameservers(context.Background(), "example.com", []string{"a.com"})
+	if err == nil {
+		t.Fatal("expected error on 422")
 	}
 }
 
