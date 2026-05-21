@@ -377,6 +377,59 @@ func TestEnsureLoginLocked_CallableUnderHeldLock(t *testing.T) {
 	}
 }
 
+func TestFetchControlPanelCSRFLocked_ExtractsMetaToken(t *testing.T) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/control_panel/domain/example.com" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`<html><head>
+<meta name="csrf-token" content="abc123xyz">
+</head></html>`))
+	})
+	defer srv.Close()
+	c.loggedAt = time.Now() // skip login
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	token, err := c.fetchControlPanelCSRFLocked(context.Background(), "example.com")
+	if err != nil {
+		t.Fatalf("fetchControlPanelCSRFLocked: %v", err)
+	}
+	if token != "abc123xyz" {
+		t.Errorf("token = %q, want abc123xyz", token)
+	}
+}
+
+func TestFetchControlPanelCSRFLocked_MissingMetaTag(t *testing.T) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`<html><head></head></html>`))
+	})
+	defer srv.Close()
+	c.loggedAt = time.Now()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, err := c.fetchControlPanelCSRFLocked(context.Background(), "example.com")
+	if err == nil {
+		t.Fatal("expected error when meta tag absent")
+	}
+}
+
+func TestFetchControlPanelCSRFLocked_Non2xx(t *testing.T) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "denied", http.StatusForbidden)
+	})
+	defer srv.Close()
+	c.loggedAt = time.Now()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, err := c.fetchControlPanelCSRFLocked(context.Background(), "example.com")
+	if err == nil {
+		t.Fatal("expected error on 403")
+	}
+}
+
 func TestDomainDelegation_JSONShape(t *testing.T) {
 	// Tentative envelope per design A6: flat object, not wrapped.
 	body := `{"id":"domain-example.com","domain_name":"example.com","nameservers":["a.com","b.com"]}`

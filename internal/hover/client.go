@@ -145,6 +145,42 @@ func (c *Client) ensureLoginLocked(ctx context.Context) error {
 
 var csrfRe = regexp.MustCompile(`<input[^>]+name="_token"[^>]+value="([^"]+)"`)
 
+// csrfMetaRe extracts the Rails CSRF meta token from a control-panel HTML
+// page. Distinct from csrfRe (form-token regex used by the /signin flow)
+// because the control-panel pages embed the token as a meta tag for the
+// SPA layer to read, while /signin embeds it as a hidden input.
+//
+// Both shapes coexist in the Hover-served HTML; we match each from the
+// page where it's authoritative.
+var csrfMetaRe = regexp.MustCompile(`<meta\s+name="csrf-token"\s+content="([^"]+)"`)
+
+// fetchControlPanelCSRFLocked retrieves the meta-tag CSRF token from
+// /control_panel/domain/<name>. Caller MUST hold c.mu (so the HTTP GET
+// and any subsequent PUT execute against the same session-cookie state).
+func (c *Client) fetchControlPanelCSRFLocked(ctx context.Context, domainName string) (string, error) {
+	endpoint := fmt.Sprintf("%s/control_panel/domain/%s", hoverHost, url.PathEscape(domainName))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req.Header.Set("User-Agent", c.UserAgent)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("hover: fetch control_panel CSRF for %q: %w", domainName, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return "", fmt.Errorf("hover: fetch control_panel CSRF for %q: HTTP %d: %s", domainName, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("hover: fetch control_panel CSRF for %q: read body: %w", domainName, err)
+	}
+	m := csrfMetaRe.FindSubmatch(body)
+	if len(m) < 2 {
+		return "", fmt.Errorf("hover: CSRF meta tag not found at /control_panel/domain/%s (control_panel UI changed?)", domainName)
+	}
+	return string(m[1]), nil
+}
+
 func (c *Client) fetchSignInCSRF(ctx context.Context) (string, error) {
 	return c.fetchCSRF(ctx, hoverHost+"/signin")
 }
