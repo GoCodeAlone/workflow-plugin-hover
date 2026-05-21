@@ -1,6 +1,7 @@
 package hover
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -79,9 +80,20 @@ func (c *Client) Login(ctx context.Context) error {
 
 // ensureLogin re-authenticates iff the session is stale. Safe to call
 // before every API hit; idempotent within sessionStaleAfter.
+//
+// Acquires c.mu internally. Callers that already hold the lock must
+// call ensureLoginLocked instead.
 func (c *Client) ensureLogin(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.ensureLoginLocked(ctx)
+}
+
+// ensureLoginLocked is the implementation of ensureLogin without the lock
+// acquisition. Caller MUST hold c.mu. Used by SetNameservers which holds
+// c.mu across the full auth → CSRF → PUT sequence to eliminate the
+// TOCTOU window between auth-check and PUT.
+func (c *Client) ensureLoginLocked(ctx context.Context) error {
 	if !c.loggedAt.IsZero() && time.Since(c.loggedAt) < sessionStaleAfter {
 		return nil
 	}
@@ -133,6 +145,59 @@ func (c *Client) ensureLogin(ctx context.Context) error {
 }
 
 var csrfRe = regexp.MustCompile(`<input[^>]+name="_token"[^>]+value="([^"]+)"`)
+
+// CSRF meta-tag extraction. Distinct from csrfRe (form-token regex used
+// by the /signin flow) because the control-panel pages embed the token
+// as a meta tag for the SPA layer to read, while /signin embeds it as a
+// hidden input. Both shapes coexist in the Hover-served HTML; each is
+// matched from the page where it's authoritative.
+//
+// Two patterns to handle both HTML attribute orderings + single/double
+// quotes. Rails+SPA codebases routinely emit either; assuming a single
+// ordering means a Hover UI update could silently break CSRF extraction.
+var (
+	csrfMetaReNameFirst    = regexp.MustCompile(`<meta\s+name\s*=\s*['"]csrf-token['"]\s+content\s*=\s*['"]([^'"]+)['"]`)
+	csrfMetaReContentFirst = regexp.MustCompile(`<meta\s+content\s*=\s*['"]([^'"]+)['"]\s+name\s*=\s*['"]csrf-token['"]`)
+)
+
+// extractCSRFMeta returns the CSRF meta token regardless of attribute
+// order or quote style. Returns "" if no match.
+func extractCSRFMeta(body []byte) string {
+	if m := csrfMetaReNameFirst.FindSubmatch(body); len(m) >= 2 {
+		return string(m[1])
+	}
+	if m := csrfMetaReContentFirst.FindSubmatch(body); len(m) >= 2 {
+		return string(m[1])
+	}
+	return ""
+}
+
+// fetchControlPanelCSRFLocked retrieves the meta-tag CSRF token from
+// /control_panel/domain/<name>. Caller MUST hold c.mu (so the HTTP GET
+// and any subsequent PUT execute against the same session-cookie state).
+func (c *Client) fetchControlPanelCSRFLocked(ctx context.Context, domainName string) (string, error) {
+	endpoint := fmt.Sprintf("%s/control_panel/domain/%s", hoverHost, url.PathEscape(domainName))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req.Header.Set("User-Agent", c.UserAgent)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("hover: fetch control_panel CSRF for %q: %w", domainName, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return "", fmt.Errorf("hover: fetch control_panel CSRF for %q: HTTP %d: %s", domainName, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("hover: fetch control_panel CSRF for %q: read body: %w", domainName, err)
+	}
+	token := extractCSRFMeta(body)
+	if token == "" {
+		return "", fmt.Errorf("hover: CSRF meta tag not found at /control_panel/domain/%s (control_panel UI changed?)", domainName)
+	}
+	return token, nil
+}
 
 func (c *Client) fetchSignInCSRF(ctx context.Context) (string, error) {
 	return c.fetchCSRF(ctx, hoverHost+"/signin")
@@ -206,6 +271,25 @@ func (c *Client) postForm(ctx context.Context, urlStr string, form url.Values) e
 	return nil
 }
 
+// DomainDelegation is the response shape of GET /api/control_panel/domains/domain-<name>.
+// Distinct from Domain (which represents the /api/domains/<name>/dns shape with Records)
+// to avoid ambiguity over which fields are populated by which endpoint.
+//
+// Tentative envelope per design A6: flat object, not wrapped in {"domains":[...]}.
+// First field-test call must confirm this shape; if Hover returns a different envelope
+// the implementer pauses and amends the design before proceeding.
+type DomainDelegation struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"domain_name"`
+	Nameservers []string `json:"nameservers"`
+}
+
+// ErrEmptyNameservers is returned by GetDomainDelegation when the parsed
+// response has zero nameservers. Converts the silent-thrash failure mode
+// (empty → Diff says NeedsUpdate forever → re-PUT loop) into a loud,
+// single-iteration error visible at the first wfctl plan.
+var ErrEmptyNameservers = errors.New("hover: delegation read returned 0 nameservers (verify field shape)")
+
 // DNSRecord mirrors Hover's internal API record shape.
 type DNSRecord struct {
 	ID      string `json:"id,omitempty"`
@@ -220,6 +304,107 @@ type Domain struct {
 	ID      string      `json:"id"`
 	Name    string      `json:"domain_name"`
 	Records []DNSRecord `json:"entries"`
+}
+
+// GetDomainDelegation fetches the registrar-level nameserver delegation for
+// the named domain via the control-panel API (same endpoint family as the
+// PUT used by SetNameservers — more likely to surface nameservers reliably
+// than the DNS-records-oriented /api/domains/<name>/dns endpoint).
+//
+// Returns ErrEmptyNameservers if the parsed response has zero nameservers.
+// This loud-on-empty behavior is intentional: it converts the silent
+// re-apply thrash failure mode (empty → Diff says NeedsUpdate forever)
+// into a single-iteration error visible at first wfctl plan.
+func (c *Client) GetDomainDelegation(ctx context.Context, domainName string) (*DomainDelegation, error) {
+	if err := c.ensureLogin(ctx); err != nil {
+		return nil, err
+	}
+	endpoint := fmt.Sprintf("%s/api/control_panel/domains/domain-%s", hoverHost, url.PathEscape(domainName))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req.Header.Set("User-Agent", c.UserAgent)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("hover: GetDomainDelegation %q: %w", domainName, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("hover: GetDomainDelegation %q: HTTP %d: %s", domainName, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var d DomainDelegation
+	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+		return nil, fmt.Errorf("hover: GetDomainDelegation %q: decode: %w", domainName, err)
+	}
+	if len(d.Nameservers) == 0 {
+		return nil, fmt.Errorf("hover: GetDomainDelegation %q: %w", domainName, ErrEmptyNameservers)
+	}
+	return &d, nil
+}
+
+// SetNameservers updates the registrar-level nameservers for a domain via
+// Hover's control-panel API.
+//
+// Lock discipline: holds c.mu for the entire auth → CSRF fetch → PUT
+// sequence. This eliminates the TOCTOU window between auth-check and
+// PUT (another goroutine cannot re-auth and invalidate the CSRF token
+// between the two requests).
+//
+// Trade-off: any concurrent caller using the same *Client blocks for
+// the full duration of the held-lock sequence. Worst case (session is
+// stale and re-auth fires inside ensureLoginLocked):
+//   - GET /signin (CSRF for the form)
+//   - POST /signin (credentials)
+//   - GET /signin/totp (MFA probe)
+//   - POST /signin/totp (TOTP code, only if MFA enabled)
+//   - GET /control_panel/domain/<name> (CSRF for the API write)
+//   - PUT /api/control_panel/domains/domain-<name>
+//
+// Up to ~180s at the 30s default per-request timeout when re-auth is
+// needed; ~60s on the warm-session path (CSRF GET + PUT). Acceptable
+// for the field-test scope (single goroutine, one delegation
+// resource). Future: cache CSRF at session granularity if
+// mixed-resource throughput becomes a concern.
+func (c *Client) SetNameservers(ctx context.Context, domainName string, ns []string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.ensureLoginLocked(ctx); err != nil {
+		return err
+	}
+	csrf, err := c.fetchControlPanelCSRFLocked(ctx, domainName)
+	if err != nil {
+		return err
+	}
+	return c.putNameserversLocked(ctx, domainName, ns, csrf)
+}
+
+// putNameserversLocked PUTs the nameservers list. Caller MUST hold c.mu.
+//
+// Note: the wire payload uses []string directly — encoding/json serializes
+// it as a JSON array, which is what Hover expects. This is distinct from
+// the []any requirement in ResourceOutput.Outputs (which crosses the
+// structpb gRPC boundary); typed slices are fine here because the wire
+// format is plain JSON, not structpb.
+func (c *Client) putNameserversLocked(ctx context.Context, domainName string, ns []string, csrf string) error {
+	endpoint := fmt.Sprintf("%s/api/control_panel/domains/domain-%s", hoverHost, url.PathEscape(domainName))
+	payload := map[string]any{"field": "nameservers", "value": ns}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("hover: SetNameservers %q: marshal: %w", domainName, err)
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", c.UserAgent)
+	req.Header.Set("X-CSRF-Token", csrf)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("hover: SetNameservers %q: %w", domainName, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("hover: SetNameservers %q: HTTP %d: %s", domainName, resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	return nil
 }
 
 // GetDomain returns the full Domain struct (including the

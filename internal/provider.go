@@ -19,7 +19,9 @@ import (
 var Version = "dev"
 
 // HoverProvider implements interfaces.IaCProvider for Hover.
-// It supports a single resource type: infra.dns.
+// Supports two resource types:
+//   - infra.dns           — DNS records within Hover's nameservers.
+//   - infra.dns_delegation — registrar-level nameserver delegation.
 type HoverProvider struct {
 	client  *hover.Client
 	drivers map[string]interfaces.ResourceDriver
@@ -82,7 +84,8 @@ func (p *HoverProvider) Initialize(ctx context.Context, config map[string]any) e
 
 	p.client = c
 	p.drivers = map[string]interfaces.ResourceDriver{
-		"infra.dns": drivers.NewDNSDriver(c),
+		"infra.dns":            drivers.NewDNSDriver(c),
+		"infra.dns_delegation": drivers.NewDelegationDriver(c),
 	}
 	return nil
 }
@@ -92,6 +95,11 @@ func (p *HoverProvider) Capabilities() []interfaces.IaCCapabilityDeclaration {
 	return []interfaces.IaCCapabilityDeclaration{
 		{
 			ResourceType: "infra.dns",
+			Tier:         1,
+			Operations:   []string{"create", "read", "update", "delete"},
+		},
+		{
+			ResourceType: "infra.dns_delegation",
 			Tier:         1,
 			Operations:   []string{"create", "read", "update", "delete"},
 		},

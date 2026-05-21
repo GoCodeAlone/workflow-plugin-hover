@@ -2,11 +2,16 @@ package hover
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // signinCSRFHTML is what we return on GET /signin + /signin/totp so
@@ -358,6 +363,210 @@ func TestClient_DeleteRecord(t *testing.T) {
 	}
 }
 
+func TestEnsureLoginLocked_CallableUnderHeldLock(t *testing.T) {
+	// Build a Client with a fresh loggedAt so ensureLoginLocked
+	// short-circuits without making HTTP calls.
+	c, err := NewClient(Credentials{Username: "u", Password: "p"}, nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	c.loggedAt = time.Now() // skip the actual login
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.ensureLoginLocked(context.Background()); err != nil {
+		t.Errorf("ensureLoginLocked under held mu: %v", err)
+	}
+}
+
+func TestFetchControlPanelCSRFLocked_ExtractsMetaToken(t *testing.T) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/control_panel/domain/example.com" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`<html><head>
+<meta name="csrf-token" content="abc123xyz">
+</head></html>`))
+	})
+	defer srv.Close()
+	c.loggedAt = time.Now() // skip login
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	token, err := c.fetchControlPanelCSRFLocked(context.Background(), "example.com")
+	if err != nil {
+		t.Fatalf("fetchControlPanelCSRFLocked: %v", err)
+	}
+	if token != "abc123xyz" {
+		t.Errorf("token = %q, want abc123xyz", token)
+	}
+}
+
+func TestFetchControlPanelCSRFLocked_MissingMetaTag(t *testing.T) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`<html><head></head></html>`))
+	})
+	defer srv.Close()
+	c.loggedAt = time.Now()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, err := c.fetchControlPanelCSRFLocked(context.Background(), "example.com")
+	if err == nil {
+		t.Fatal("expected error when meta tag absent")
+	}
+}
+
+func TestFetchControlPanelCSRFLocked_Non2xx(t *testing.T) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "denied", http.StatusForbidden)
+	})
+	defer srv.Close()
+	c.loggedAt = time.Now()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, err := c.fetchControlPanelCSRFLocked(context.Background(), "example.com")
+	if err == nil {
+		t.Fatal("expected error on 403")
+	}
+}
+
+func TestGetDomainDelegation_HappyPath(t *testing.T) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/control_panel/domains/domain-example.com" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"id":"domain-example.com","domain_name":"example.com","nameservers":["ns1.do.com","ns2.do.com"]}`))
+	})
+	defer srv.Close()
+	c.loggedAt = time.Now()
+
+	dom, err := c.GetDomainDelegation(context.Background(), "example.com")
+	if err != nil {
+		t.Fatalf("GetDomainDelegation: %v", err)
+	}
+	if dom.ID != "domain-example.com" {
+		t.Errorf("ID = %q", dom.ID)
+	}
+	if len(dom.Nameservers) != 2 {
+		t.Errorf("Nameservers len = %d, want 2", len(dom.Nameservers))
+	}
+}
+
+func TestGetDomainDelegation_EmptyNameserversReturnsSentinel(t *testing.T) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"domain-example.com","domain_name":"example.com","nameservers":[]}`))
+	})
+	defer srv.Close()
+	c.loggedAt = time.Now()
+
+	_, err := c.GetDomainDelegation(context.Background(), "example.com")
+	if !errors.Is(err, ErrEmptyNameservers) {
+		t.Fatalf("want ErrEmptyNameservers, got %v", err)
+	}
+}
+
+func TestGetDomainDelegation_Non2xx(t *testing.T) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	})
+	defer srv.Close()
+	c.loggedAt = time.Now()
+
+	_, err := c.GetDomainDelegation(context.Background(), "example.com")
+	if err == nil {
+		t.Fatal("expected error on 404")
+	}
+}
+
+func TestSetNameservers_PUTShape(t *testing.T) {
+	var capturedURL, capturedToken, capturedCT string
+	var capturedBody []byte
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/control_panel/domain/example.com":
+			_, _ = w.Write([]byte(`<meta name="csrf-token" content="test-csrf-token">`))
+		case "/api/control_panel/domains/domain-example.com":
+			capturedURL = r.URL.Path
+			capturedToken = r.Header.Get("X-CSRF-Token")
+			capturedCT = r.Header.Get("Content-Type")
+			capturedBody, _ = io.ReadAll(r.Body)
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+	})
+	defer srv.Close()
+	c.loggedAt = time.Now()
+
+	err := c.SetNameservers(context.Background(), "example.com", []string{"a.com", "b.com"})
+	if err != nil {
+		t.Fatalf("SetNameservers: %v", err)
+	}
+	if capturedURL != "/api/control_panel/domains/domain-example.com" {
+		t.Errorf("URL = %q", capturedURL)
+	}
+	if capturedToken != "test-csrf-token" {
+		t.Errorf("X-CSRF-Token = %q", capturedToken)
+	}
+	if !strings.HasPrefix(capturedCT, "application/json") {
+		t.Errorf("Content-Type = %q", capturedCT)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(capturedBody, &payload); err != nil {
+		t.Fatalf("body decode: %v", err)
+	}
+	if payload["field"] != "nameservers" {
+		t.Errorf("field = %v", payload["field"])
+	}
+	val, _ := payload["value"].([]any)
+	if len(val) != 2 || val[0] != "a.com" || val[1] != "b.com" {
+		t.Errorf("value = %v, want [a.com b.com]", payload["value"])
+	}
+}
+
+func TestSetNameservers_Non2xxPUT(t *testing.T) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/control_panel/domain/") {
+			_, _ = w.Write([]byte(`<meta name="csrf-token" content="t">`))
+			return
+		}
+		http.Error(w, "bad token", http.StatusUnprocessableEntity)
+	})
+	defer srv.Close()
+	c.loggedAt = time.Now()
+
+	err := c.SetNameservers(context.Background(), "example.com", []string{"a.com"})
+	if err == nil {
+		t.Fatal("expected error on 422")
+	}
+}
+
+func TestDomainDelegation_JSONShape(t *testing.T) {
+	// Tentative envelope per design A6: flat object, not wrapped.
+	body := `{"id":"domain-example.com","domain_name":"example.com","nameservers":["a.com","b.com"]}`
+	var d DomainDelegation
+	if err := json.Unmarshal([]byte(body), &d); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if d.ID != "domain-example.com" {
+		t.Errorf("ID = %q, want domain-example.com", d.ID)
+	}
+	if d.Name != "example.com" {
+		t.Errorf("Name = %q, want example.com", d.Name)
+	}
+	if len(d.Nameservers) != 2 || d.Nameservers[0] != "a.com" || d.Nameservers[1] != "b.com" {
+		t.Errorf("Nameservers = %v, want [a.com b.com]", d.Nameservers)
+	}
+}
+
+func TestErrEmptyNameservers_IsSentinel(t *testing.T) {
+	wrapped := fmt.Errorf("hover GetDomainDelegation: %w", ErrEmptyNameservers)
+	if !errors.Is(wrapped, ErrEmptyNameservers) {
+		t.Error("errors.Is should match ErrEmptyNameservers when wrapped")
+	}
+}
+
 func TestClient_ListRecords_DomainNotFound(t *testing.T) {
 	// API returns empty domains list — our client must return a clear error.
 	respBody := `{"domains": []}`
@@ -373,5 +582,20 @@ func TestClient_ListRecords_DomainNotFound(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestExtractCSRFMeta_AttributeOrders(t *testing.T) {
+	cases := []struct{ name, html, want string }{
+		{"name-first double quotes", `<meta name="csrf-token" content="abc">`, "abc"},
+		{"content-first double quotes", `<meta content="xyz" name="csrf-token">`, "xyz"},
+		{"name-first single quotes", `<meta name='csrf-token' content='qqq'>`, "qqq"},
+		{"content-first single quotes", `<meta content='zzz' name='csrf-token'>`, "zzz"},
+		{"missing", `<meta name="other" content="nope">`, ""},
+	}
+	for _, tc := range cases {
+		if got := extractCSRFMeta([]byte(tc.html)); got != tc.want {
+			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
+		}
 	}
 }

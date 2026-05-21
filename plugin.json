@@ -24,7 +24,8 @@
     "stepTypes": [],
     "triggerTypes": [],
     "resourceTypes": [
-      "infra.dns"
+      "infra.dns",
+      "infra.dns_delegation"
     ]
   },
   "required_secrets": [
