@@ -32,7 +32,6 @@ modules:
       password: ${HOVER_PASSWORD}
       totp_secret: ${HOVER_TOTP_SECRET}
 
-resources:
   - name: example-com
     type: infra.dns
     config:
