@@ -164,6 +164,27 @@ func TestDelegationDriver_Read_UsesPublicNSBeforeHoverLogin(t *testing.T) {
 	}
 }
 
+func TestDelegationDriver_AdoptionRef_UsesSpecDomain(t *testing.T) {
+	d := NewDelegationDriverWithClient(&fakeDelegationClient{})
+	ref, ok, err := d.AdoptionRef(interfaces.ResourceSpec{
+		Name: "delegation",
+		Type: "infra.dns_delegation",
+		Config: map[string]any{
+			"domain":      "example.com",
+			"nameservers": []any{"ns1.example.com"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("AdoptionRef: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected adoption ref")
+	}
+	if ref.Name != "delegation" || ref.Type != "infra.dns_delegation" || ref.ProviderID != "example.com" {
+		t.Fatalf("unexpected ref: %+v", ref)
+	}
+}
+
 func TestDelegationDriver_Read_PropagatesError(t *testing.T) {
 	fc := &fakeDelegationClient{getErr: errors.New("API down")}
 	d := NewDelegationDriverWithClient(fc)

@@ -58,6 +58,21 @@ func (d *DelegationDriver) ProviderIDFormat() interfaces.ProviderIDFormat {
 	return interfaces.IDFormatDomainName
 }
 
+// AdoptionRef lets wfctl adopt an already-delegated domain before creating
+// registrar state. Read uses public NS first, so an already-correct delegation
+// can plan as no-op without requiring Hover authentication.
+func (d *DelegationDriver) AdoptionRef(spec interfaces.ResourceSpec) (interfaces.ResourceRef, bool, error) {
+	s, err := parseDelegationSpec(spec)
+	if err != nil {
+		return interfaces.ResourceRef{}, false, err
+	}
+	return interfaces.ResourceRef{
+		Name:       spec.Name,
+		Type:       "infra.dns_delegation",
+		ProviderID: s.domain,
+	}, true, nil
+}
+
 // dnsDelegationSpec is the parsed config view.
 type dnsDelegationSpec struct {
 	domain      string
