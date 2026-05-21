@@ -1,11 +1,10 @@
 // Package hover implements the Hover DNS provider client.
 //
 // Hover ships no official API. This package mimics the browser-side
-// authentication flow exercised by pjslauta/hover-dyn-dns:
+// authentication flow exposed by Hover's signin UI:
 //
-//  1. POST https://www.hover.com/signin (username, password) with
-//     CSRF `_token` parsed from the signin page.
-//  2. POST https://www.hover.com/signin/totp (code, _token).
+//  1. POST https://www.hover.com/signin/auth.json (username, password).
+//  2. POST https://www.hover.com/signin/auth2.json (code) when MFA is required.
 //  3. Subsequent requests carry the session cookie jar.
 //
 // TOTP codes are RFC 6238 (HMAC-SHA1, 30s window, 6 digits).
