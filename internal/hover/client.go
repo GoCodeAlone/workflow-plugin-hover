@@ -206,6 +206,25 @@ func (c *Client) postForm(ctx context.Context, urlStr string, form url.Values) e
 	return nil
 }
 
+// DomainDelegation is the response shape of GET /api/control_panel/domains/domain-<name>.
+// Distinct from Domain (which represents the /api/domains/<name>/dns shape with Records)
+// to avoid ambiguity over which fields are populated by which endpoint.
+//
+// Tentative envelope per design A6: flat object, not wrapped in {"domains":[...]}.
+// First field-test call must confirm this shape; if Hover returns a different envelope
+// the implementer pauses and amends the design before proceeding.
+type DomainDelegation struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"domain_name"`
+	Nameservers []string `json:"nameservers"`
+}
+
+// ErrEmptyNameservers is returned by GetDomainDelegation when the parsed
+// response has zero nameservers. Converts the silent-thrash failure mode
+// (empty → Diff says NeedsUpdate forever → re-PUT loop) into a loud,
+// single-iteration error visible at the first wfctl plan.
+var ErrEmptyNameservers = errors.New("hover: delegation read returned 0 nameservers (verify field shape)")
+
 // DNSRecord mirrors Hover's internal API record shape.
 type DNSRecord struct {
 	ID      string `json:"id,omitempty"`

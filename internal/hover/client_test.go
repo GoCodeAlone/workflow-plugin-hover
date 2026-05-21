@@ -2,6 +2,9 @@ package hover
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -355,6 +358,31 @@ func TestClient_DeleteRecord(t *testing.T) {
 	}
 	if !strings.HasSuffix(deletedPath, "/r1") {
 		t.Errorf("deletedPath = %q; want suffix /r1", deletedPath)
+	}
+}
+
+func TestDomainDelegation_JSONShape(t *testing.T) {
+	// Tentative envelope per design A6: flat object, not wrapped.
+	body := `{"id":"domain-example.com","domain_name":"example.com","nameservers":["a.com","b.com"]}`
+	var d DomainDelegation
+	if err := json.Unmarshal([]byte(body), &d); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if d.ID != "domain-example.com" {
+		t.Errorf("ID = %q, want domain-example.com", d.ID)
+	}
+	if d.Name != "example.com" {
+		t.Errorf("Name = %q, want example.com", d.Name)
+	}
+	if len(d.Nameservers) != 2 || d.Nameservers[0] != "a.com" || d.Nameservers[1] != "b.com" {
+		t.Errorf("Nameservers = %v, want [a.com b.com]", d.Nameservers)
+	}
+}
+
+func TestErrEmptyNameservers_IsSentinel(t *testing.T) {
+	wrapped := fmt.Errorf("hover GetDomainDelegation: %w", ErrEmptyNameservers)
+	if !errors.Is(wrapped, ErrEmptyNameservers) {
+		t.Error("errors.Is should match ErrEmptyNameservers when wrapped")
 	}
 }
 
