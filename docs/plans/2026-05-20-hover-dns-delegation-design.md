@@ -1,7 +1,7 @@
 # Hover DNS Delegation — `infra.dns_delegation` Design
 
 **Date:** 2026-05-20
-**Status:** Revised after adversarial review round 1
+**Status:** Revised after adversarial review round 2
 **Scope:** workflow-plugin-hover v0.2.0 — new resource type for registrar-level nameserver delegation
 **Field-test target:** gocodealone.tech → ns1/2/3.digitalocean.com
 
@@ -48,25 +48,25 @@ The plugin PR (#1) is the entire scope of the current autonomous pass. #2 and #3
 
 ### `internal/hover/client.go` extensions
 
-- `Domain.Nameservers []string \`json:"nameservers,omitempty"\`` — added to the existing struct. Source = the new control-panel detail endpoint (see Read path below), NOT the DNS-records endpoint. Backwards-compatible additive field; existing `GetDomain` callers unaffected (returns empty when source endpoint doesn't supply it).
+- `type DomainDelegation struct { ID string; Name string; Nameservers []string }` — **distinct new type** for the control-panel detail endpoint. Avoids polluting the existing `Domain` (which represents the `/api/domains/<name>/dns` shape with `Records []DNSRecord`). Two endpoints → two types → no ambiguity over which fields are populated by which path. (Per adversarial review round 2 finding #2.)
 - `csrfMetaRe = regexp.MustCompile(\`<meta\s+name="csrf-token"\s+content="([^"]+)"\`)` — new regex distinct from the existing `csrfRe` (form-token regex used for `/signin`). Comment cites both, names the page each is fetched from, and notes that an empty match on either regex is treated as "page UI changed".
 - `fetchControlPanelCSRF(ctx context.Context, domainName string) (string, error)` — `GET /control_panel/domain/<name>`, parses meta token via `csrfMetaRe`. Non-2xx → typed error "hover: fetch control_panel CSRF: HTTP %d"; missing meta → typed error "hover: CSRF meta tag not found at /control_panel/domain/%s (control_panel UI changed?)". Caller must hold `c.mu` (see Concurrency section).
-- `GetDomainDelegation(ctx context.Context, domainName string) (*Domain, error)` — **new method** (per adversarial review recommendation #2). `GET /api/control_panel/domains/domain-<name>`. Same API family as the PUT; far more likely to surface the `nameservers` field reliably. Returns a `*Domain` with `Nameservers` populated. This is the **primary Read source** for `DelegationDriver`.
+- `GetDomainDelegation(ctx context.Context, domainName string) (*DomainDelegation, error)` — **new method**. `GET /api/control_panel/domains/domain-<name>`. Same API family as the PUT; far more likely to surface the `nameservers` field reliably. Returns a `*DomainDelegation`. **If the parsed response yields zero nameservers, returns a typed error `ErrEmptyNameservers`** rather than a zero-length slice. This converts the silent-thrash failure mode (empty → Diff says NeedsUpdate forever → re-PUT loop) into a loud, single-iteration error visible at the first `wfctl plan`. (Per adversarial review round 2 finding #3.) This is the **primary Read source** for `DelegationDriver`.
 - `SetNameservers(ctx context.Context, domainName string, ns []string) error` — see Concurrency section below for lock discipline. Eager `ensureLogin`, `fetchControlPanelCSRF`, `PUT /api/control_panel/domains/domain-<name>` with JSON body + `X-CSRF-Token` header. PUT non-2xx → surface Hover's body as error.
 
-### Concurrency: `SetNameservers` + `ensureLogin` interaction
+### Concurrency: `SetNameservers` holds `c.mu` across the entire critical section
 
-The existing `ensureLogin` holds `c.mu` for its entire duration. `SetNameservers` does:
+Adversarial review round 2 identified a TOCTOU window in the round-1 design: calling `ensureLogin` (which acquires+releases `c.mu`) BEFORE acquiring the lock for the CSRF+PUT phase still allowed another goroutine to re-auth in the gap between the two lock-acquisitions.
+
+Round-2 fix: add a private `ensureLoginLocked(ctx)` helper that checks `loggedAt` and re-auths without acquiring `c.mu` (caller must already hold it). Refactor existing `ensureLogin` to acquire-lock-then-call-Locked. `SetNameservers` holds the lock for the entire auth → CSRF → PUT sequence:
 
 ```go
 func (c *Client) SetNameservers(ctx context.Context, domainName string, ns []string) error {
-    if err := c.ensureLogin(ctx); err != nil {  // acquires + releases c.mu
-        return err
-    }
     c.mu.Lock()
     defer c.mu.Unlock()
-    // Inside the lock, both the CSRF fetch and the PUT execute against
-    // the same session-cookie state. No re-auth can fire between them.
+    if err := c.ensureLoginLocked(ctx); err != nil {
+        return err
+    }
     csrf, err := c.fetchControlPanelCSRFLocked(ctx, domainName)
     if err != nil {
         return err
@@ -75,14 +75,16 @@ func (c *Client) SetNameservers(ctx context.Context, domainName string, ns []str
 }
 ```
 
-Two `Locked` helpers added (`fetchControlPanelCSRFLocked`, `putNameserversLocked`) so the public `SetNameservers` can hold the lock across both HTTP round trips, eliminating the race window the reviewer identified.
+Three `*Locked` helpers added: `ensureLoginLocked`, `fetchControlPanelCSRFLocked`, `putNameserversLocked`. The existing public `ensureLogin` becomes a thin wrapper that acquires-then-calls-Locked, preserving its existing call sites' lock semantics (no behavior change to existing callers).
+
+This genuinely eliminates the race window: no other goroutine can interleave between auth-check and PUT, because the lock is held throughout. The pattern follows standard Go mutex discipline (Locked variants for callers already holding the lock).
 
 ### `internal/drivers/delegation.go` (new, ~150 LoC)
 
 - `type DelegationDriver struct { client HoverDelegationClient }` where the test-injectable interface is:
   ```go
   type HoverDelegationClient interface {
-      GetDomainDelegation(ctx context.Context, domain string) (*hover.Domain, error)
+      GetDomainDelegation(ctx context.Context, domain string) (*hover.DomainDelegation, error)
       SetNameservers(ctx context.Context, domain string, ns []string) error
   }
   ```
@@ -170,7 +172,7 @@ wfctl persists state. Subsequent Plans no-op until config changes.
 | Cloudflare challenge on PUT | Manifests as non-2xx → same path. Operator must allowlist the runner IP. README documents. |
 | Domain rename via Update | Typed error "domain change requires resource replace, not update". |
 | Delete: PUT to previous_nameservers (or default) fails | Propagate; IaC state retained. |
-| Read endpoint returns empty `nameservers` field | Diff treats current as empty → first Plan after that point reports `NeedsUpdate=true` once. After the next Apply succeeds, state catches up. Logged warning for visibility. |
+| Read endpoint returns empty `nameservers` field | `GetDomainDelegation` returns typed `ErrEmptyNameservers`. `Read` propagates as error; `Diff` propagates; `wfctl plan` fails loudly with "hover: delegation read returned 0 nameservers; verify field shape" — converts the previous silent re-apply thrash into a single-iteration loud failure. |
 
 ## Testing
 
@@ -211,6 +213,17 @@ The change touches runtime (plugin loading + a live registrar PUT), so rollback 
 1. **CSRF-per-PUT cost**: per-PUT control_panel page fetch doubles the request count. If Hover throttles these GETs we may need to fall back to cached-with-1h-TTL CSRF. User-chosen "fetch fresh" is the safer default.
 2. **Cloudflare on GHA**: shared-IP runners can trip bot challenges. Fallback: self-hosted runner with a stable egress IP that's been allowlisted via a manual login from that IP.
 3. **A6 — Read endpoint coverage**: now mitigated by switching primary Read from `/api/domains/<name>/dns` to `/api/control_panel/domains/domain-<name>` (same API family as the PUT). Still needs live curl verification as the first implementation step.
+
+## Adversarial review round 2 — findings addressed
+
+| Finding | Severity | Resolution |
+|---|---|---|
+| TOCTOU between `ensureLogin` and `c.mu.Lock()` in `SetNameservers` | Critical | Refactored: new `ensureLoginLocked` helper; `SetNameservers` holds `c.mu` for the entire auth → CSRF → PUT sequence. No interleaving window. |
+| `Domain` struct dual-population ambiguity | Important | Introduced distinct `DomainDelegation` type returned by `GetDomainDelegation`. Existing `Domain` struct unchanged. |
+| Silent Apply thrash if Read returns empty nameservers | Important | `GetDomainDelegation` returns typed `ErrEmptyNameservers` on zero-entries. Loud failure at first plan instead of silent loop. |
+| `HoverProvider` struct comment not updated | Minor | Implementation will update both the type comment and Initialize. |
+| Field-test YAML shape not communicated to follow-up session | Minor | PR #1 description will include the draft `dns.wfctl.yaml` shape. |
+| ForceNew Replace codepath unjustified vs requirements | Minor | Kept for symmetry with namecheap pattern + future-proofing; explicit test case added to driver_test for documentation, not because the user asked for cross-domain rename. |
 
 ## Adversarial review round 1 — findings addressed
 
