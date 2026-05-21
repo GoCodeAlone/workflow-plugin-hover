@@ -26,8 +26,9 @@ Re-auth fires whenever the in-memory session is older than 1 hour.
 ```yaml
 modules:
   - name: hover
-    type: iac.provider.hover
+    type: iac.provider
     config:
+      provider: hover
       username: ${HOVER_USERNAME}
       password: ${HOVER_PASSWORD}
       totp_secret: ${HOVER_TOTP_SECRET}
