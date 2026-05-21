@@ -14,10 +14,6 @@ import (
 	"time"
 )
 
-// signinCSRFHTML is what we return on GET /signin + /signin/totp so
-// the client's CSRF regex finds a token.
-const signinCSRFHTML = `<form><input type="hidden" name="_token" value="t0kEnVaLuE"></form>`
-
 func newStubClient(t *testing.T, handler http.HandlerFunc) (*Client, *httptest.Server) {
 	t.Helper()
 	srv := httptest.NewServer(handler)
@@ -49,26 +45,23 @@ func (r rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func TestClient_Login_TwoStep_WithMFA(t *testing.T) {
 	var hits []string
-	var totpForm string
+	var totpBody map[string]any
 	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
 		hits = append(hits, r.Method+" "+r.URL.Path)
 		switch r.URL.Path {
-		case "/signin":
-			if r.Method == http.MethodGet {
-				_, _ = w.Write([]byte(signinCSRFHTML))
-				return
+		case "/signin/auth.json":
+			if r.Method != http.MethodPost {
+				t.Errorf("auth method = %s, want POST", r.Method)
 			}
-			// POST: just succeed.
-			w.WriteHeader(http.StatusOK)
-		case "/signin/totp":
-			if r.Method == http.MethodGet {
-				// Returning signinCSRFHTML signals that MFA is enabled.
-				_, _ = w.Write([]byte(signinCSRFHTML))
-				return
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "need_2fa", "type": "app"})
+		case "/signin/auth2.json":
+			if r.Method != http.MethodPost {
+				t.Errorf("auth2 method = %s, want POST", r.Method)
 			}
-			_ = r.ParseForm()
-			totpForm = r.Form.Encode()
-			w.WriteHeader(http.StatusOK)
+			if err := json.NewDecoder(r.Body).Decode(&totpBody); err != nil {
+				t.Errorf("decode auth2 body: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "completed"})
 		default:
 			t.Errorf("unexpected hit: %s %s", r.Method, r.URL.Path)
 		}
@@ -80,10 +73,8 @@ func TestClient_Login_TwoStep_WithMFA(t *testing.T) {
 	}
 
 	wantHits := []string{
-		"GET /signin",
-		"POST /signin",
-		"GET /signin/totp",
-		"POST /signin/totp",
+		"POST /signin/auth.json",
+		"POST /signin/auth2.json",
 	}
 	if len(hits) != len(wantHits) {
 		t.Fatalf("hits = %v; want %v", hits, wantHits)
@@ -94,35 +85,25 @@ func TestClient_Login_TwoStep_WithMFA(t *testing.T) {
 		}
 	}
 
-	// TOTP form must include a 6-digit code + the CSRF token from the
-	// GET response.
-	if !strings.Contains(totpForm, "_token=t0kEnVaLuE") {
-		t.Errorf("TOTP POST missing CSRF: %q", totpForm)
+	if _, ok := totpBody["code"].(string); !ok {
+		t.Errorf("TOTP POST missing code: %#v", totpBody)
 	}
-	if !strings.Contains(totpForm, "code=") {
-		t.Errorf("TOTP POST missing code: %q", totpForm)
+	if totpBody["remember"] != false {
+		t.Errorf("TOTP POST remember = %#v, want false", totpBody["remember"])
 	}
 }
 
 func TestClient_Login_NoMFA(t *testing.T) {
-	// Hover account with MFA disabled: /signin/totp GET returns a page
-	// without a _token, so the TOTP POST step is skipped.
 	var hits []string
 	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
 		hits = append(hits, r.Method+" "+r.URL.Path)
 		switch r.URL.Path {
-		case "/signin":
-			if r.Method == http.MethodGet {
-				_, _ = w.Write([]byte(signinCSRFHTML))
-				return
+		case "/signin/auth.json":
+			if r.Method != http.MethodPost {
+				t.Errorf("auth method = %s, want POST", r.Method)
 			}
-			w.WriteHeader(http.StatusOK)
-		case "/signin/totp":
-			if r.Method == http.MethodGet {
-				// No _token → MFA not enabled on this account.
-				_, _ = w.Write([]byte("<html>no token here — already logged in</html>"))
-				return
-			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "completed"})
+		case "/signin/auth2.json":
 			t.Errorf("unexpected TOTP POST — account has no MFA")
 		default:
 			t.Errorf("unexpected hit: %s %s", r.Method, r.URL.Path)
@@ -135,9 +116,7 @@ func TestClient_Login_NoMFA(t *testing.T) {
 	}
 
 	wantHits := []string{
-		"GET /signin",
-		"POST /signin",
-		"GET /signin/totp",
+		"POST /signin/auth.json",
 	}
 	if len(hits) != len(wantHits) {
 		t.Fatalf("hits = %v; want %v", hits, wantHits)
@@ -149,18 +128,8 @@ func TestClient_Login_SkipsWhenFresh(t *testing.T) {
 	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
 		hits++
 		switch r.URL.Path {
-		case "/signin":
-			if r.Method == http.MethodGet {
-				_, _ = w.Write([]byte(signinCSRFHTML))
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-		case "/signin/totp":
-			if r.Method == http.MethodGet {
-				// No MFA on this account.
-				_, _ = w.Write([]byte("<html>no token</html>"))
-				return
-			}
+		case "/signin/auth.json":
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "completed"})
 		default:
 			w.WriteHeader(http.StatusOK)
 		}
@@ -179,19 +148,18 @@ func TestClient_Login_SkipsWhenFresh(t *testing.T) {
 	}
 }
 
-func TestClient_CSRFParseFailure_RaisesClearError(t *testing.T) {
+func TestClient_LoginFailure_RaisesClearError(t *testing.T) {
 	c, srv := newStubClient(t, func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("<html>no token here</html>"))
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]any{"succeeded": false, "error": "Invalid username or password."})
 	})
 	defer srv.Close()
 
-	// The /signin GET will return no CSRF token — Login must surface a
-	// clear error rather than silently failing.
 	err := c.Login(context.Background())
 	if err == nil {
-		t.Fatal("expected CSRF parse error")
+		t.Fatal("expected login error")
 	}
-	if !strings.Contains(err.Error(), "CSRF token not found") {
+	if !strings.Contains(err.Error(), "Invalid username or password") {
 		t.Errorf("wrong error: %v", err)
 	}
 }
@@ -215,16 +183,8 @@ func newRecordStub(t *testing.T, apiHandler http.HandlerFunc) (*Client, *httptes
 	mux := http.NewServeMux()
 
 	// Login flow
-	mux.HandleFunc("/signin", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			_, _ = w.Write([]byte(signinCSRFHTML))
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	})
-	mux.HandleFunc("/signin/totp", func(w http.ResponseWriter, r *http.Request) {
-		// No MFA token → skip TOTP.
-		_, _ = w.Write([]byte("<html>logged in</html>"))
+	mux.HandleFunc("/signin/auth.json", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "completed"})
 	})
 
 	// API endpoints — delegate to caller.
