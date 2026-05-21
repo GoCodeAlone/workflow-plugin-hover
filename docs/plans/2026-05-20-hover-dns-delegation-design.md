@@ -149,7 +149,6 @@ wfctl Plan → DelegationDriver.Diff(desired, current)
   ↓
 wfctl Apply → DelegationDriver.Create or Update
    ├── ctx.Err check
-   ├── Create only: GetDomainDelegation → stash current NS as previous_nameservers (best-effort)
    ├── client.SetNameservers
    │   ├── lock c.mu (acquired FIRST)
    │   ├── ensureLoginLocked (no separate lock; runs under held c.mu)
@@ -157,7 +156,7 @@ wfctl Apply → DelegationDriver.Create or Update
    │   └── PUT /api/control_panel/domains/domain-<name>
    │         Body:   {"field":"nameservers","value":[...]}
    │         Header: X-CSRF-Token: <token>
-   └── 200 → return dnsDelegationOutputFromDesired(domain, ns, previous_ns)
+   └── 200 → return delegationOutput(domain, ns)
   ↓
 wfctl persists state. Subsequent Plans no-op until config changes.
 ```
@@ -169,7 +168,6 @@ wfctl persists state. Subsequent Plans no-op until config changes.
 | CSRF-fetch non-2xx | Typed error "hover: fetch control_panel CSRF: HTTP %d"; PUT not attempted. |
 | CSRF meta tag missing | Typed error "hover: CSRF meta tag not found at /control_panel/domain/%s (control_panel UI changed?)". |
 | Login expired between CSRF fetch and PUT | Cannot happen: both run under the same `c.mu` lock-hold; no re-auth can interleave. |
-| Pre-change `GetDomainDelegation` fails during Create | Logged warning; Create proceeds with empty `previous_nameservers`. Not blocking. |
 | PUT non-2xx | Surface Hover's response body: "hover SetNameservers %q: HTTP %d: %s". |
 | Cloudflare challenge on PUT | Manifests as non-2xx → same path. Operator must allowlist the runner IP. README documents. |
 | Domain rename via Update | Typed error "domain change requires resource replace, not update". |

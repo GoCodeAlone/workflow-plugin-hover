@@ -200,21 +200,21 @@ git commit -m "refactor(hover): split ensureLogin into Locked variant"
 
 **Step 1: Write the failing test**
 
-Add to `internal/hover/client_test.go`:
+Add to `internal/hover/client_test.go` using the existing `newStubClient` helper (DO NOT introduce a new `newTestClient`):
 
 ```go
 func TestFetchControlPanelCSRFLocked_ExtractsMetaToken(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/control_panel/domain/example.com" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 		_, _ = w.Write([]byte(`<html><head>
 <meta name="csrf-token" content="abc123xyz">
 </head></html>`))
-	}))
+	})
 	defer srv.Close()
+	c.loggedAt = time.Now() // skip login
 
-	c := newTestClient(t, srv.URL)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	token, err := c.fetchControlPanelCSRFLocked(context.Background(), "example.com")
@@ -227,12 +227,12 @@ func TestFetchControlPanelCSRFLocked_ExtractsMetaToken(t *testing.T) {
 }
 
 func TestFetchControlPanelCSRFLocked_MissingMetaTag(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`<html><head></head></html>`))
-	}))
+	})
 	defer srv.Close()
+	c.loggedAt = time.Now()
 
-	c := newTestClient(t, srv.URL)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	_, err := c.fetchControlPanelCSRFLocked(context.Background(), "example.com")
@@ -242,12 +242,12 @@ func TestFetchControlPanelCSRFLocked_MissingMetaTag(t *testing.T) {
 }
 
 func TestFetchControlPanelCSRFLocked_Non2xx(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "denied", http.StatusForbidden)
-	}))
+	})
 	defer srv.Close()
+	c.loggedAt = time.Now()
 
-	c := newTestClient(t, srv.URL)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	_, err := c.fetchControlPanelCSRFLocked(context.Background(), "example.com")
@@ -257,28 +257,7 @@ func TestFetchControlPanelCSRFLocked_Non2xx(t *testing.T) {
 }
 ```
 
-**Use the existing helpers.** `internal/hover/client_test.go` already provides:
-- `func newStubClient(t *testing.T, handler http.HandlerFunc) (*Client, *httptest.Server)` — builds a Client with cookie jar + `rewriteTransport`.
-- `type rewriteTransport struct{ base string }` + `RoundTrip` — rewrites all outbound URLs to the httptest server base.
-
-The tests above should be authored against `newStubClient` (passing a `http.HandlerFunc` that dispatches by path), NOT a new `newTestClient` helper. Do NOT introduce a duplicate `rewritingTransport` struct — it would collide with the existing `rewriteTransport`.
-
-Pattern (replaces all `newTestClient(t, srv.URL)` and `httptest.NewServer(...)` references in this and subsequent tasks):
-
-```go
-c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
-    switch r.URL.Path {
-    case "/control_panel/domain/example.com":
-        _, _ = w.Write([]byte(`<meta name="csrf-token" content="abc123xyz">`))
-    default:
-        t.Errorf("unexpected path: %s", r.URL.Path)
-    }
-})
-defer srv.Close()
-c.loggedAt = time.Now() // skip login (newStubClient builds a fresh client)
-```
-
-Re-author each `TestFetchControlPanelCSRFLocked_*` (and all subsequent task tests) using this `newStubClient` shape; the assertions on URL, headers, body content remain identical.
+**Existing helpers used:** `internal/hover/client_test.go` already provides `func newStubClient(t *testing.T, handler http.HandlerFunc) (*Client, *httptest.Server)` + the supporting `rewriteTransport`. Tasks 3–5 use these directly; DO NOT add a new `newTestClient` or `rewritingTransport`.
 
 **Step 2: Run tests to verify they fail**
 
@@ -350,15 +329,15 @@ git commit -m "feat(hover): fetchControlPanelCSRFLocked + csrfMetaRe regex"
 
 ```go
 func TestGetDomainDelegation_HappyPath(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/control_panel/domains/domain-example.com" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 		_, _ = w.Write([]byte(`{"id":"domain-example.com","domain_name":"example.com","nameservers":["ns1.do.com","ns2.do.com"]}`))
-	}))
+	})
 	defer srv.Close()
+	c.loggedAt = time.Now()
 
-	c := newTestClient(t, srv.URL)
 	dom, err := c.GetDomainDelegation(context.Background(), "example.com")
 	if err != nil {
 		t.Fatalf("GetDomainDelegation: %v", err)
@@ -372,12 +351,12 @@ func TestGetDomainDelegation_HappyPath(t *testing.T) {
 }
 
 func TestGetDomainDelegation_EmptyNameserversReturnsSentinel(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"id":"domain-example.com","domain_name":"example.com","nameservers":[]}`))
-	}))
+	})
 	defer srv.Close()
+	c.loggedAt = time.Now()
 
-	c := newTestClient(t, srv.URL)
 	_, err := c.GetDomainDelegation(context.Background(), "example.com")
 	if !errors.Is(err, ErrEmptyNameservers) {
 		t.Fatalf("want ErrEmptyNameservers, got %v", err)
@@ -385,12 +364,12 @@ func TestGetDomainDelegation_EmptyNameserversReturnsSentinel(t *testing.T) {
 }
 
 func TestGetDomainDelegation_Non2xx(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
-	}))
+	})
 	defer srv.Close()
+	c.loggedAt = time.Now()
 
-	c := newTestClient(t, srv.URL)
 	_, err := c.GetDomainDelegation(context.Background(), "example.com")
 	if err == nil {
 		t.Fatal("expected error on 404")
@@ -469,7 +448,7 @@ git commit -m "feat(hover): GetDomainDelegation method (loud on empty)"
 func TestSetNameservers_PUTShape(t *testing.T) {
 	var capturedURL, capturedToken, capturedCT string
 	var capturedBody []byte
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/control_panel/domain/example.com":
 			_, _ = w.Write([]byte(`<meta name="csrf-token" content="test-csrf-token">`))
@@ -482,10 +461,10 @@ func TestSetNameservers_PUTShape(t *testing.T) {
 		default:
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-	}))
+	})
 	defer srv.Close()
+	c.loggedAt = time.Now()
 
-	c := newTestClient(t, srv.URL)
 	err := c.SetNameservers(context.Background(), "example.com", []string{"a.com", "b.com"})
 	if err != nil {
 		t.Fatalf("SetNameservers: %v", err)
@@ -513,16 +492,16 @@ func TestSetNameservers_PUTShape(t *testing.T) {
 }
 
 func TestSetNameservers_Non2xxPUT(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/control_panel/domain/") {
 			_, _ = w.Write([]byte(`<meta name="csrf-token" content="t">`))
 			return
 		}
 		http.Error(w, "bad token", http.StatusUnprocessableEntity)
-	}))
+	})
 	defer srv.Close()
+	c.loggedAt = time.Now()
 
-	c := newTestClient(t, srv.URL)
 	err := c.SetNameservers(context.Background(), "example.com", []string{"a.com"})
 	if err == nil {
 		t.Fatal("expected error on 422")
@@ -703,9 +682,10 @@ type HoverDelegationClient interface {
 // (infra.dns_delegation) for Hover-registered domains.
 //
 // ProviderID = apex domain name (e.g. "example.com"). One resource = one
-// domain. Outputs include the desired nameservers as []any (structpb-safe)
-// and a stashed previous_nameservers list captured at Create time for
-// Delete-restoration.
+// domain. Outputs contain only the desired nameservers as []any
+// (structpb-safe). v0.2.0 ships Delete = reset to Hover defaults
+// [ns1.hover.com, ns2.hover.com]; restore-from-stash is deferred to
+// v0.3.0 because interfaces.ResourceRef has no state channel.
 type DelegationDriver struct {
 	client HoverDelegationClient
 }
@@ -1553,10 +1533,45 @@ func (p *HoverProvider) Capabilities() []interfaces.IaCCapabilityDeclaration {
 Run: `GOWORK=off go test ./internal -count=1`
 Expected: PASS for capabilities + all existing tests.
 
+**Step 4b: Update existing iacserver_test.go capability assertion**
+
+The pre-existing `TestHoverIaCServer_Capabilities` (in `internal/iacserver_test.go` around line 41-47) hard-codes:
+
+```go
+if len(resp.GetCapabilities()) != 1 {
+    t.Fatalf("expected 1 capability, got %d", len(resp.GetCapabilities()))
+}
+cap := resp.GetCapabilities()[0]
+if cap.GetResourceType() != "infra.dns" {
+    t.Errorf("ResourceType = %q want %q", cap.GetResourceType(), "infra.dns")
+}
+```
+
+After registration the response carries 2 capabilities; this test breaks. Update to:
+
+```go
+caps := resp.GetCapabilities()
+if len(caps) != 2 {
+    t.Fatalf("expected 2 capabilities, got %d", len(caps))
+}
+gotTypes := map[string]bool{}
+for _, c := range caps {
+    gotTypes[c.GetResourceType()] = true
+}
+for _, want := range []string{"infra.dns", "infra.dns_delegation"} {
+    if !gotTypes[want] {
+        t.Errorf("capability %q missing", want)
+    }
+}
+```
+
+Run: `GOWORK=off go test ./internal -count=1 -run TestHoverIaCServer_Capabilities -v`
+Expected: PASS.
+
 **Step 5: Commit**
 
 ```bash
-git add internal/provider.go internal/provider_test.go
+git add internal/provider.go internal/provider_test.go internal/iacserver_test.go
 git commit -m "feat(provider): register DelegationDriver + update Capabilities"
 ```
 
@@ -1657,7 +1672,7 @@ X-CSRF-Token: <rails-csrf>
 - New \`DelegationDriver\` registered as \`infra.dns_delegation\` alongside the existing \`infra.dns\` driver.
 - \`plugin.json\` declares the new resource type.
 - Outputs structpb-safe (\`[]any\` not \`[]string\`).
-- Delete stashes \`previous_nameservers\` at Create for restore; falls back to \`[ns1.hover.com, ns2.hover.com]\` for state-less resources.
+- Delete = reset to \`[ns1.hover.com, ns2.hover.com]\` (Hover defaults). Restore-from-stash deferred to v0.3.0 (requires \`interfaces.ResourceRef\` to gain a state channel).
 
 ## Follow-ups (deferred to a separate session)
 
