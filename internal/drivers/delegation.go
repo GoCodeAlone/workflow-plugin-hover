@@ -245,12 +245,17 @@ func (d *DelegationDriver) Delete(ctx context.Context, ref interfaces.ResourceRe
 // Diff compares desired vs current. Multiset semantics on nameservers
 // (order-independent — Hover accepts any order on PUT). Domain rename
 // (desired vs current.ProviderID) forces Replace.
-func (d *DelegationDriver) Diff(_ context.Context, desired interfaces.ResourceSpec, current *interfaces.ResourceOutput) (*interfaces.DiffResult, error) {
+func (d *DelegationDriver) Diff(ctx context.Context, desired interfaces.ResourceSpec, current *interfaces.ResourceOutput) (*interfaces.DiffResult, error) {
 	s, err := parseDelegationSpec(desired)
 	if err != nil {
 		return nil, err
 	}
 	if current == nil {
+		if d.nsResolver != nil {
+			if ns, err := d.nsResolver(ctx, s.domain); err == nil && sameNameserverSet(ns, s.nameservers) {
+				return &interfaces.DiffResult{NeedsUpdate: false}, nil
+			}
+		}
 		return &interfaces.DiffResult{NeedsUpdate: true}, nil
 	}
 	if current.ProviderID != "" && !strings.EqualFold(s.domain, current.ProviderID) {
@@ -316,10 +321,10 @@ func sameNameserverSet(a, b []string) bool {
 	sa := make([]string, len(a))
 	sb := make([]string, len(b))
 	for i, s := range a {
-		sa[i] = strings.ToLower(s)
+		sa[i] = strings.ToLower(normalizeNameserverHost(s))
 	}
 	for i, s := range b {
-		sb[i] = strings.ToLower(s)
+		sb[i] = strings.ToLower(normalizeNameserverHost(s))
 	}
 	sort.Strings(sa)
 	sort.Strings(sb)

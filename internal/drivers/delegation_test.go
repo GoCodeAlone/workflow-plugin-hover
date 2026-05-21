@@ -258,6 +258,33 @@ func TestDelegationDriver_Diff_NilCurrent(t *testing.T) {
 	}
 }
 
+func TestDelegationDriver_Diff_NilCurrent_UsesPublicNSNoop(t *testing.T) {
+	fc := &fakeDelegationClient{getErr: errors.New("Hover login should not be needed")}
+	d := NewDelegationDriverWithClientAndResolver(fc, func(_ context.Context, domain string) ([]string, error) {
+		if domain != "example.com" {
+			t.Fatalf("resolver domain = %q, want example.com", domain)
+		}
+		return []string{"ns2.digitalocean.com.", "ns1.digitalocean.com.", "ns3.digitalocean.com."}, nil
+	})
+	spec := interfaces.ResourceSpec{
+		Name: "example.com", Type: "infra.dns_delegation",
+		Config: map[string]any{
+			"domain":      "example.com",
+			"nameservers": []any{"ns1.digitalocean.com", "ns2.digitalocean.com", "ns3.digitalocean.com"},
+		},
+	}
+	res, err := d.Diff(context.Background(), spec, nil)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	if res.NeedsUpdate {
+		t.Fatalf("expected NeedsUpdate=false when public NS already matches desired, got %+v", res)
+	}
+	if fc.getCalls != 0 {
+		t.Fatalf("GetDomainDelegation called %d times; public NS should avoid Hover login", fc.getCalls)
+	}
+}
+
 func TestDelegationDriver_Diff_UpToDate_OrderIndependent(t *testing.T) {
 	d := NewDelegationDriverWithClient(&fakeDelegationClient{})
 	spec := interfaces.ResourceSpec{
