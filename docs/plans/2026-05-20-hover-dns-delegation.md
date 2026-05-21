@@ -119,7 +119,7 @@ git commit -m "feat(hover): DomainDelegation type + ErrEmptyNameservers sentinel
 ### Task 2: Refactor `ensureLogin` into `ensureLogin` + `ensureLoginLocked`
 
 **Files:**
-- Modify: `internal/hover/client.go:82-133` — split lock-acquisition from body
+- Modify: `internal/hover/client.go` — split `func (c *Client) ensureLogin` into a thin lock-acquiring wrapper + a `*Locked` body (function name reference; line numbers shift across tasks)
 
 **Step 1: Write the failing test**
 
@@ -257,41 +257,28 @@ func TestFetchControlPanelCSRFLocked_Non2xx(t *testing.T) {
 }
 ```
 
-If `newTestClient` doesn't exist yet, add a helper (still in `client_test.go`):
+**Use the existing helpers.** `internal/hover/client_test.go` already provides:
+- `func newStubClient(t *testing.T, handler http.HandlerFunc) (*Client, *httptest.Server)` — builds a Client with cookie jar + `rewriteTransport`.
+- `type rewriteTransport struct{ base string }` + `RoundTrip` — rewrites all outbound URLs to the httptest server base.
+
+The tests above should be authored against `newStubClient` (passing a `http.HandlerFunc` that dispatches by path), NOT a new `newTestClient` helper. Do NOT introduce a duplicate `rewritingTransport` struct — it would collide with the existing `rewriteTransport`.
+
+Pattern (replaces all `newTestClient(t, srv.URL)` and `httptest.NewServer(...)` references in this and subsequent tasks):
 
 ```go
-// newTestClient builds a Client that points at a httptest server URL by
-// monkey-patching hoverHost via a package-level test override.
-func newTestClient(t *testing.T, baseURL string) *Client {
-	t.Helper()
-	// Use a fresh Client and point its http.Client at the test server via
-	// a custom transport that rewrites the request URL host.
-	c, err := NewClient(Credentials{Username: "u", Password: "p"}, &http.Client{
-		Transport: &rewritingTransport{base: baseURL},
-		Timeout:   5 * time.Second,
-	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-	c.loggedAt = time.Now() // skip login
-	return c
-}
-
-type rewritingTransport struct{ base string }
-
-func (rt *rewritingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	target, err := url.Parse(rt.base + req.URL.Path)
-	if err != nil {
-		return nil, err
-	}
-	target.RawQuery = req.URL.RawQuery
-	req.URL = target
-	req.Host = target.Host
-	return http.DefaultTransport.RoundTrip(req)
-}
+c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+    switch r.URL.Path {
+    case "/control_panel/domain/example.com":
+        _, _ = w.Write([]byte(`<meta name="csrf-token" content="abc123xyz">`))
+    default:
+        t.Errorf("unexpected path: %s", r.URL.Path)
+    }
+})
+defer srv.Close()
+c.loggedAt = time.Now() // skip login (newStubClient builds a fresh client)
 ```
 
-If a similar helper already exists in `internal/hover/client_test.go` (likely — check existing tests), reuse it.
+Re-author each `TestFetchControlPanelCSRFLocked_*` (and all subsequent task tests) using this `newStubClient` shape; the assertions on URL, headers, body content remain identical.
 
 **Step 2: Run tests to verify they fail**
 
@@ -580,6 +567,12 @@ func (c *Client) SetNameservers(ctx context.Context, domainName string, ns []str
 }
 
 // putNameserversLocked PUTs the nameservers list. Caller MUST hold c.mu.
+//
+// Note: the wire payload uses []string directly — encoding/json serializes
+// it as a JSON array, which is what Hover expects. This is distinct from
+// the []any requirement in ResourceOutput.Outputs (which crosses the
+// structpb gRPC boundary); typed slices are fine here because the wire
+// format is plain JSON, not structpb.
 func (c *Client) putNameserversLocked(ctx context.Context, domainName string, ns []string, csrf string) error {
 	endpoint := fmt.Sprintf("%s/api/control_panel/domains/domain-%s", hoverHost, url.PathEscape(domainName))
 	payload := map[string]any{"field": "nameservers", "value": ns}
@@ -753,6 +746,8 @@ git commit -m "feat(drivers): DelegationDriver skeleton + interface"
 
 ### Task 7: Implement `DelegationDriver.Create` + `parseDelegationSpec` + `nameserversToAny`
 
+**Note re: state-restore for Delete:** `interfaces.ResourceRef` (`workflow/interfaces/iac_provider.go:183-187`) has only `{Name, Type, ProviderID}` fields — no channel for the engine to pass last-applied Outputs into Delete. The original design's "stash previous_nameservers at Create / restore at Delete" approach is structurally impossible against the current interface. **v0.2.0 ships Delete = always reset to `[ns1.hover.com, ns2.hover.com]` (the documented A5 fallback).** The stash-and-restore enhancement is deferred to a v0.3.0 follow-up that would require an interfaces change. Outputs therefore omit `previous_nameservers` entirely.
+
 **Files:**
 - Modify: `internal/drivers/delegation.go`
 
@@ -762,13 +757,7 @@ Append to `internal/drivers/delegation_test.go`:
 
 ```go
 func TestDelegationDriver_Create_CallsSetNameservers(t *testing.T) {
-	fc := &fakeDelegationClient{
-		getResult: &hover.DomainDelegation{
-			ID:          "domain-example.com",
-			Name:        "example.com",
-			Nameservers: []string{"ns1.hover.com", "ns2.hover.com"},
-		},
-	}
+	fc := &fakeDelegationClient{}
 	d := NewDelegationDriverWithClient(fc)
 	spec := interfaces.ResourceSpec{
 		Name: "example.com",
@@ -800,14 +789,9 @@ func TestDelegationDriver_Create_CallsSetNameservers(t *testing.T) {
 	if len(nsAny) != 3 {
 		t.Errorf("Outputs.nameservers len = %d, want 3", len(nsAny))
 	}
-	// previous_nameservers stashed from Hover defaults
-	prevRaw, ok := out.Outputs["previous_nameservers"]
-	if !ok {
-		t.Fatal("Outputs.previous_nameservers missing")
-	}
-	prevAny, _ := prevRaw.([]any)
-	if len(prevAny) != 2 {
-		t.Errorf("previous_nameservers len = %d, want 2", len(prevAny))
+	// previous_nameservers NOT in Outputs for v0.2.0 (no state channel).
+	if _, present := out.Outputs["previous_nameservers"]; present {
+		t.Errorf("v0.2.0 Outputs should not contain previous_nameservers")
 	}
 }
 
@@ -851,33 +835,9 @@ func TestDelegationDriver_Create_DuplicateNameservers_Rejected(t *testing.T) {
 	}
 }
 
-func TestDelegationDriver_Create_PreviousReadFails_Continues(t *testing.T) {
-	// Best-effort pre-change read: failure is non-fatal.
-	fc := &fakeDelegationClient{
-		getErr: errors.New("read flaked"),
-	}
-	d := NewDelegationDriverWithClient(fc)
-	spec := interfaces.ResourceSpec{
-		Name: "example.com",
-		Type: "infra.dns_delegation",
-		Config: map[string]any{
-			"domain":      "example.com",
-			"nameservers": []any{"a.com", "b.com"},
-		},
-	}
-	out, err := d.Create(context.Background(), spec)
-	if err != nil {
-		t.Fatalf("Create with read failure should still succeed: %v", err)
-	}
-	// previous_nameservers should be empty []any when read failed.
-	prev, _ := out.Outputs["previous_nameservers"].([]any)
-	if len(prev) != 0 {
-		t.Errorf("previous_nameservers = %v, want empty when pre-read failed", prev)
-	}
-}
 ```
 
-Add `"errors"` to the test imports if needed.
+No errors import needed for Task 7.
 
 **Step 2: Run tests to verify they fail**
 
@@ -947,26 +907,23 @@ func nameserversToAny(ns []string) []any {
 }
 
 // delegationOutput builds the ResourceOutput for a Create/Update result.
-// previous_nameservers may be nil; the helper converts to empty []any.
-func delegationOutput(name, domain string, ns, previous []string) *interfaces.ResourceOutput {
-	if previous == nil {
-		previous = []string{}
-	}
+// v0.2.0 ships without previous_nameservers (no state channel in
+// interfaces.ResourceRef; v0.3.0 follow-up).
+func delegationOutput(name, domain string, ns []string) *interfaces.ResourceOutput {
 	return &interfaces.ResourceOutput{
 		Name:       name,
 		Type:       "infra.dns_delegation",
 		ProviderID: domain,
 		Outputs: map[string]any{
-			"domain":               domain,
-			"nameservers":          nameserversToAny(ns),
-			"previous_nameservers": nameserversToAny(previous),
+			"domain":      domain,
+			"nameservers": nameserversToAny(ns),
 		},
 		Status: "active",
 	}
 }
 
-// Create stashes the current upstream nameservers (best-effort) as
-// previous_nameservers, then PUTs the desired set.
+// Create PUTs the desired nameservers. Output built from the desired set
+// (no read-after-write); SetNameservers is authoritative on success.
 func (d *DelegationDriver) Create(ctx context.Context, spec interfaces.ResourceSpec) (*interfaces.ResourceOutput, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("dns_delegation create: %w", err)
@@ -975,18 +932,13 @@ func (d *DelegationDriver) Create(ctx context.Context, spec interfaces.ResourceS
 	if err != nil {
 		return nil, err
 	}
-	var previous []string
-	if dom, err := d.client.GetDomainDelegation(ctx, s.domain); err == nil && dom != nil {
-		previous = append([]string(nil), dom.Nameservers...)
-	}
-	// Best-effort: if GetDomainDelegation failed, previous remains nil → empty []any in output.
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("dns_delegation create %q: %w", s.domain, err)
 	}
 	if err := d.client.SetNameservers(ctx, s.domain, s.nameservers); err != nil {
 		return nil, fmt.Errorf("dns_delegation create %q: %w", s.domain, err)
 	}
-	return delegationOutput(spec.Name, s.domain, s.nameservers, previous), nil
+	return delegationOutput(spec.Name, s.domain, s.nameservers), nil
 }
 ```
 
@@ -1086,40 +1038,23 @@ func TestDelegationDriver_Update_DomainRenameRejected(t *testing.T) {
 	}
 }
 
-func TestDelegationDriver_Delete_RestoresPreviousNameservers(t *testing.T) {
+func TestDelegationDriver_Delete_ResetsToHoverDefaults(t *testing.T) {
+	// v0.2.0 ships fallback-only Delete: ResourceRef has no state
+	// channel (verified: workflow/interfaces/iac_provider.go:183-187
+	// defines ResourceRef as {Name, Type, ProviderID}). Restore from
+	// stashed previous_nameservers is a v0.3.0 follow-up requiring
+	// an interfaces change.
 	fc := &fakeDelegationClient{}
 	d := NewDelegationDriverWithClient(fc)
-	ref := interfaces.ResourceRef{
-		Name: "example.com", ProviderID: "example.com",
-		InputSnapshot: map[string]any{
-			"previous_nameservers": []any{"old1.com", "old2.com"},
-		},
-	}
-	if err := d.Delete(context.Background(), ref); err != nil {
-		t.Fatalf("Delete: %v", err)
-	}
-	if len(fc.lastSetNS) != 2 || fc.lastSetNS[0] != "old1.com" {
-		t.Errorf("Delete set NS = %v, want [old1.com old2.com]", fc.lastSetNS)
-	}
-}
-
-func TestDelegationDriver_Delete_FallbackHoverDefaults(t *testing.T) {
-	fc := &fakeDelegationClient{}
-	d := NewDelegationDriverWithClient(fc)
-	// No previous_nameservers in InputSnapshot.
 	ref := interfaces.ResourceRef{Name: "example.com", ProviderID: "example.com"}
 	if err := d.Delete(context.Background(), ref); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	if len(fc.lastSetNS) != 2 || fc.lastSetNS[0] != "ns1.hover.com" || fc.lastSetNS[1] != "ns2.hover.com" {
-		t.Errorf("Delete set NS = %v, want [ns1.hover.com ns2.hover.com] fallback", fc.lastSetNS)
+		t.Errorf("Delete set NS = %v, want [ns1.hover.com ns2.hover.com]", fc.lastSetNS)
 	}
 }
 ```
-
-Note: `interfaces.ResourceRef.InputSnapshot` may not exist on all versions of the workflow interface — check existing tests for the canonical way to pass state to Delete. If `InputSnapshot` isn't a field on `ResourceRef`, the test should use whatever channel the existing `DNSDriver.Delete` uses (likely the state file resolved by the engine before Delete is called).
-
-If `ResourceRef` doesn't have `InputSnapshot`, adjust the design: stash previous_nameservers in the resource's State backing rather than the ref. Inspect `/Users/jon/workspace/workflow/interfaces/iac_resource_driver.go` to confirm.
 
 **Step 2: Run tests to verify they fail**
 
@@ -1144,9 +1079,7 @@ func (d *DelegationDriver) Read(ctx context.Context, ref interfaces.ResourceRef)
 	if err != nil {
 		return nil, fmt.Errorf("dns_delegation read %q: %w", ref.Name, err)
 	}
-	// Read does not populate previous_nameservers (state-only field
-	// captured at Create time). Leave as empty []any.
-	return delegationOutput(ref.Name, domain, dom.Nameservers, nil), nil
+		return delegationOutput(ref.Name, domain, dom.Nameservers), nil
 }
 
 // Update replaces the registrar nameservers. Rejects in-place domain
@@ -1172,17 +1105,17 @@ func (d *DelegationDriver) Update(ctx context.Context, ref interfaces.ResourceRe
 	if err := d.client.SetNameservers(ctx, currentDomain, s.nameservers); err != nil {
 		return nil, fmt.Errorf("dns_delegation update %q: %w", ref.Name, err)
 	}
-	return delegationOutput(ref.Name, currentDomain, s.nameservers, nil), nil
+	return delegationOutput(ref.Name, currentDomain, s.nameservers), nil
 }
 
-// hoverDefaultNameservers is the fallback for Delete when previous_nameservers
-// is not in the resource's input snapshot. Documented as best-effort in the
-// design (assumption A5).
+// hoverDefaultNameservers is the Delete target for v0.2.0 (per A5).
+// ResourceRef has no state channel for previous_nameservers restore;
+// that enhancement is v0.3.0 follow-up territory.
 var hoverDefaultNameservers = []string{"ns1.hover.com", "ns2.hover.com"}
 
-// Delete restores the stashed previous_nameservers (or the Hover-default
-// fallback). Caller's state must surface previous_nameservers via
-// ref.InputSnapshot for the restore path to fire.
+// Delete resets the registrar nameservers to Hover's defaults.
+// Operators whose domains had non-default originals must restore
+// manually via the Hover UI if a Delete fires unintended.
 func (d *DelegationDriver) Delete(ctx context.Context, ref interfaces.ResourceRef) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("dns_delegation delete %q: %w", ref.Name, err)
@@ -1191,30 +1124,12 @@ func (d *DelegationDriver) Delete(ctx context.Context, ref interfaces.ResourceRe
 	if domain == "" {
 		domain = ref.Name
 	}
-	ns := hoverDefaultNameservers
-	if ref.InputSnapshot != nil {
-		if raw, ok := ref.InputSnapshot["previous_nameservers"]; ok {
-			if list, ok := raw.([]any); ok && len(list) > 0 {
-				restored := make([]string, 0, len(list))
-				for _, item := range list {
-					if s, ok := item.(string); ok && s != "" {
-						restored = append(restored, s)
-					}
-				}
-				if len(restored) > 0 {
-					ns = restored
-				}
-			}
-		}
-	}
-	if err := d.client.SetNameservers(ctx, domain, ns); err != nil {
+	if err := d.client.SetNameservers(ctx, domain, hoverDefaultNameservers); err != nil {
 		return fmt.Errorf("dns_delegation delete %q: %w", ref.Name, err)
 	}
 	return nil
 }
 ```
-
-If `interfaces.ResourceRef` does NOT have `InputSnapshot` (verify via `cat /Users/jon/workspace/workflow/interfaces/iac_resource_driver.go | grep -A5 "type ResourceRef"`), substitute the correct field name and adjust both the test and impl. If no such field exists at all, the implementer MUST pause and surface this as a design amendment — Delete cannot restore previous_nameservers without a state channel.
 
 **Step 4: Run tests to verify they pass**
 
@@ -1551,21 +1466,28 @@ git commit -m "feat(drivers): DelegationDriver.HealthCheck + Scale + ctx tests"
 ### Task 11: Wire `DelegationDriver` into `HoverProvider`
 
 **Files:**
-- Modify: `internal/provider.go:22` (type comment) + `:84-87` (drivers map) + `:90-100` (Capabilities)
+- Modify: `internal/provider.go` — type comment on `HoverProvider`, drivers map in `Initialize`, `Capabilities()` return slice.
+- Test: `internal/provider_test.go` (create if absent) — direct unit test on `HoverProvider.Capabilities()` (no gRPC harness needed since `Capabilities` is a pure function returning a hardcoded slice).
 
 **Step 1: Write the failing test**
 
-Add to `internal/iacserver_test.go` (or wherever iacserver-level capability assertions live; check existing tests for the canonical place):
+Create or append to `internal/provider_test.go`:
 
 ```go
-func TestHoverIaCServer_Capabilities_IncludesDelegation(t *testing.T) {
-	// Smoke: Capabilities() must list both infra.dns and infra.dns_delegation.
-	// Tests should bring up the iacserver via the existing test harness;
-	// see iacserver_test.go for the canonical setup.
-	// Pseudocode (adapt to existing test harness):
-	caps := newTestIaCServerInitialized(t).Capabilities()
-	wantTypes := map[string]bool{"infra.dns": false, "infra.dns_delegation": false}
-	for _, c := range caps.Capabilities {
+package internal
+
+import (
+	"testing"
+)
+
+func TestHoverProvider_Capabilities_IncludesDelegation(t *testing.T) {
+	p := NewHoverProvider()
+	caps := p.Capabilities()
+	wantTypes := map[string]bool{
+		"infra.dns":            false,
+		"infra.dns_delegation": false,
+	}
+	for _, c := range caps {
 		if _, ok := wantTypes[c.ResourceType]; ok {
 			wantTypes[c.ResourceType] = true
 		}
@@ -1578,18 +1500,18 @@ func TestHoverIaCServer_Capabilities_IncludesDelegation(t *testing.T) {
 }
 ```
 
-(The implementer must adapt this to the actual existing `iacserver_test.go` harness pattern. Check the existing capabilities test there for the canonical assertion shape.)
+`Capabilities()` is a pure method that does not require `Initialize` (no client needed; the returned slice is hardcoded). No gRPC harness, no Initialize state, no fixtures.
 
 **Step 2: Run tests to verify they fail**
 
-Run: `GOWORK=off go test ./internal -count=1 -run "Capabilities" -v`
-Expected: FAIL or PASS-without-new-type — the new resource type is not yet registered.
+Run: `GOWORK=off go test ./internal -count=1 -run TestHoverProvider_Capabilities_IncludesDelegation -v`
+Expected: FAIL — Capabilities doesn't include `infra.dns_delegation` yet.
 
 **Step 3: Write minimal implementation**
 
 Edit `internal/provider.go`:
 
-1. Update the type comment at line 21-22:
+1. Update the `HoverProvider` type comment (currently single-resource-type wording):
 
 ```go
 // HoverProvider implements interfaces.IaCProvider for Hover.
@@ -1598,7 +1520,7 @@ Edit `internal/provider.go`:
 //   - infra.dns_delegation — registrar-level nameserver delegation.
 ```
 
-2. In `Initialize` (line 84), add the delegation driver to the map:
+2. In `Initialize` (the drivers map initializer), add the delegation driver:
 
 ```go
 	p.drivers = map[string]interfaces.ResourceDriver{
@@ -1607,7 +1529,7 @@ Edit `internal/provider.go`:
 	}
 ```
 
-3. In `Capabilities` (line 90-100), append the second capability:
+3. In `Capabilities()`, append the second capability:
 
 ```go
 func (p *HoverProvider) Capabilities() []interfaces.IaCCapabilityDeclaration {
@@ -1634,7 +1556,7 @@ Expected: PASS for capabilities + all existing tests.
 **Step 5: Commit**
 
 ```bash
-git add internal/provider.go internal/iacserver_test.go
+git add internal/provider.go internal/provider_test.go
 git commit -m "feat(provider): register DelegationDriver + update Capabilities"
 ```
 
