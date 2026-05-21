@@ -584,3 +584,18 @@ func TestClient_ListRecords_DomainNotFound(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
+
+func TestExtractCSRFMeta_AttributeOrders(t *testing.T) {
+	cases := []struct{ name, html, want string }{
+		{"name-first double quotes", `<meta name="csrf-token" content="abc">`, "abc"},
+		{"content-first double quotes", `<meta content="xyz" name="csrf-token">`, "xyz"},
+		{"name-first single quotes", `<meta name='csrf-token' content='qqq'>`, "qqq"},
+		{"content-first single quotes", `<meta content='zzz' name='csrf-token'>`, "zzz"},
+		{"missing", `<meta name="other" content="nope">`, ""},
+	}
+	for _, tc := range cases {
+		if got := extractCSRFMeta([]byte(tc.html)); got != tc.want {
+			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
+		}
+	}
+}

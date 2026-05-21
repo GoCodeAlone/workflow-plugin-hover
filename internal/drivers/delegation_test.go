@@ -438,3 +438,27 @@ func TestDelegationDriver_Diff_CaseInsensitiveMatch(t *testing.T) {
 		t.Error("expected NeedsUpdate=false; case-only diff is no-op")
 	}
 }
+
+func TestDelegationDriver_Diff_DomainChange_SetsBothNeedsUpdateAndReplace(t *testing.T) {
+	// Planners may gate on NeedsUpdate; setting only NeedsReplace
+	// risks the replace being skipped. Match DNSDriver pattern.
+	d := NewDelegationDriverWithClient(&fakeDelegationClient{})
+	spec := interfaces.ResourceSpec{
+		Name: "new.com", Type: "infra.dns_delegation",
+		Config: map[string]any{
+			"domain":      "new.com",
+			"nameservers": []any{"a.com", "b.com"},
+		},
+	}
+	current := &interfaces.ResourceOutput{ProviderID: "old.com"}
+	res, err := d.Diff(context.Background(), spec, current)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	if !res.NeedsReplace {
+		t.Error("NeedsReplace=false")
+	}
+	if !res.NeedsUpdate {
+		t.Error("NeedsUpdate=false; should be true alongside NeedsReplace")
+	}
+}

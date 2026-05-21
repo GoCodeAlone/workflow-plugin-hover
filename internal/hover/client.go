@@ -146,14 +146,31 @@ func (c *Client) ensureLoginLocked(ctx context.Context) error {
 
 var csrfRe = regexp.MustCompile(`<input[^>]+name="_token"[^>]+value="([^"]+)"`)
 
-// csrfMetaRe extracts the Rails CSRF meta token from a control-panel HTML
-// page. Distinct from csrfRe (form-token regex used by the /signin flow)
-// because the control-panel pages embed the token as a meta tag for the
-// SPA layer to read, while /signin embeds it as a hidden input.
+// CSRF meta-tag extraction. Distinct from csrfRe (form-token regex used
+// by the /signin flow) because the control-panel pages embed the token
+// as a meta tag for the SPA layer to read, while /signin embeds it as a
+// hidden input. Both shapes coexist in the Hover-served HTML; each is
+// matched from the page where it's authoritative.
 //
-// Both shapes coexist in the Hover-served HTML; we match each from the
-// page where it's authoritative.
-var csrfMetaRe = regexp.MustCompile(`<meta\s+name="csrf-token"\s+content="([^"]+)"`)
+// Two patterns to handle both HTML attribute orderings + single/double
+// quotes. Rails+SPA codebases routinely emit either; assuming a single
+// ordering means a Hover UI update could silently break CSRF extraction.
+var (
+	csrfMetaReNameFirst    = regexp.MustCompile(`<meta\s+name\s*=\s*['"]csrf-token['"]\s+content\s*=\s*['"]([^'"]+)['"]`)
+	csrfMetaReContentFirst = regexp.MustCompile(`<meta\s+content\s*=\s*['"]([^'"]+)['"]\s+name\s*=\s*['"]csrf-token['"]`)
+)
+
+// extractCSRFMeta returns the CSRF meta token regardless of attribute
+// order or quote style. Returns "" if no match.
+func extractCSRFMeta(body []byte) string {
+	if m := csrfMetaReNameFirst.FindSubmatch(body); len(m) >= 2 {
+		return string(m[1])
+	}
+	if m := csrfMetaReContentFirst.FindSubmatch(body); len(m) >= 2 {
+		return string(m[1])
+	}
+	return ""
+}
 
 // fetchControlPanelCSRFLocked retrieves the meta-tag CSRF token from
 // /control_panel/domain/<name>. Caller MUST hold c.mu (so the HTTP GET
@@ -175,11 +192,11 @@ func (c *Client) fetchControlPanelCSRFLocked(ctx context.Context, domainName str
 	if err != nil {
 		return "", fmt.Errorf("hover: fetch control_panel CSRF for %q: read body: %w", domainName, err)
 	}
-	m := csrfMetaRe.FindSubmatch(body)
-	if len(m) < 2 {
+	token := extractCSRFMeta(body)
+	if token == "" {
 		return "", fmt.Errorf("hover: CSRF meta tag not found at /control_panel/domain/%s (control_panel UI changed?)", domainName)
 	}
-	return string(m[1]), nil
+	return token, nil
 }
 
 func (c *Client) fetchSignInCSRF(ctx context.Context) (string, error) {

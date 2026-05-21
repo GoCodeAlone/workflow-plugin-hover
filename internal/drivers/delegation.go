@@ -221,7 +221,12 @@ func (d *DelegationDriver) Diff(_ context.Context, desired interfaces.ResourceSp
 		return &interfaces.DiffResult{NeedsUpdate: true}, nil
 	}
 	if current.ProviderID != "" && !strings.EqualFold(s.domain, current.ProviderID) {
+		// Set BOTH NeedsUpdate + NeedsReplace per the DNSDriver
+		// pattern (see dns.go). Some planner paths gate on
+		// NeedsUpdate; leaving it false risks the replace being
+		// skipped even though NeedsReplace says otherwise.
 		return &interfaces.DiffResult{
+			NeedsUpdate:  true,
 			NeedsReplace: true,
 			Changes: []interfaces.FieldChange{{
 				Path:     "domain",
