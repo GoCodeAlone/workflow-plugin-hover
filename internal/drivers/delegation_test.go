@@ -393,3 +393,20 @@ func TestDelegationDriver_Read_PropagatesErrEmptyNameservers(t *testing.T) {
 		t.Errorf("errors.Is should match hover.ErrEmptyNameservers through driver wrap; got %v", err)
 	}
 }
+
+func TestDelegationDriver_Create_CaseInsensitiveDuplicate_Rejected(t *testing.T) {
+	// DNS hostnames are case-insensitive; ["NS1.example.com", "ns1.example.com"]
+	// is a duplicate even though the strings differ. Matches the EqualFold
+	// semantics used by Update + Diff.
+	d := NewDelegationDriverWithClient(&fakeDelegationClient{})
+	spec := interfaces.ResourceSpec{
+		Name: "example.com", Type: "infra.dns_delegation",
+		Config: map[string]any{
+			"domain":      "example.com",
+			"nameservers": []any{"NS1.example.com", "ns1.example.com"},
+		},
+	}
+	if _, err := d.Create(context.Background(), spec); err == nil {
+		t.Fatal("expected error for case-insensitive duplicate nameservers")
+	}
+}

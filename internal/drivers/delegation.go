@@ -87,10 +87,13 @@ func parseDelegationSpec(spec interfaces.ResourceSpec) (dnsDelegationSpec, error
 		if s == "" {
 			return dnsDelegationSpec{}, fmt.Errorf("dns_delegation %q: nameservers[%d] must be non-empty", domain, i)
 		}
-		if _, dup := seen[s]; dup {
-			return dnsDelegationSpec{}, fmt.Errorf("dns_delegation %q: nameservers[%d] = %q is a duplicate", domain, i, s)
+		// DNS hostnames are case-insensitive; dedupe via lowercase key
+		// to match the EqualFold semantics used by Update + Diff.
+		key := strings.ToLower(s)
+		if _, dup := seen[key]; dup {
+			return dnsDelegationSpec{}, fmt.Errorf("dns_delegation %q: nameservers[%d] = %q is a duplicate (case-insensitive)", domain, i, s)
 		}
-		seen[s] = struct{}{}
+		seen[key] = struct{}{}
 		parsed = append(parsed, s)
 	}
 	return dnsDelegationSpec{domain: domain, nameservers: parsed}, nil
