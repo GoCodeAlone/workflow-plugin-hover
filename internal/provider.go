@@ -112,7 +112,28 @@ func (p *HoverProvider) ResourceDriver(resourceType string) (interfaces.Resource
 // Plan delegates to platform.ComputePlan which dispatches driver.Diff per-resource.
 func (p *HoverProvider) Plan(ctx context.Context, desired []interfaces.ResourceSpec, current []interfaces.ResourceState) (*interfaces.IaCPlan, error) {
 	plan, err := platform.ComputePlan(ctx, p, desired, current)
-	return &plan, err
+	if err != nil {
+		return nil, err
+	}
+	filtered := plan.Actions[:0]
+	for _, action := range plan.Actions {
+		if action.Action == "create" {
+			driver, err := p.ResourceDriver(action.Resource.Type)
+			if err != nil {
+				return nil, err
+			}
+			diff, err := driver.Diff(ctx, action.Resource, nil)
+			if err != nil {
+				return nil, fmt.Errorf("hover: create preflight diff %q/%q: %w", action.Resource.Type, action.Resource.Name, err)
+			}
+			if diff == nil || !diff.NeedsUpdate {
+				continue
+			}
+		}
+		filtered = append(filtered, action)
+	}
+	plan.Actions = filtered
+	return &plan, nil
 }
 
 // Destroy invokes the per-resource driver Delete for each ref.
