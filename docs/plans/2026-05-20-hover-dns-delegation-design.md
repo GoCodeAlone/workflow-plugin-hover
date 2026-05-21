@@ -1,7 +1,7 @@
 # Hover DNS Delegation — `infra.dns_delegation` Design
 
 **Date:** 2026-05-20
-**Status:** Revised after adversarial review round 2
+**Status:** Adversarial review PASS (round-3 inline clarifications per reviewer recommendation)
 **Scope:** workflow-plugin-hover v0.2.0 — new resource type for registrar-level nameserver delegation
 **Field-test target:** gocodealone.tech → ns1/2/3.digitalocean.com
 
@@ -79,6 +79,8 @@ Three `*Locked` helpers added: `ensureLoginLocked`, `fetchControlPanelCSRFLocked
 
 This genuinely eliminates the race window: no other goroutine can interleave between auth-check and PUT, because the lock is held throughout. The pattern follows standard Go mutex discipline (Locked variants for callers already holding the lock).
 
+**Trade-off acknowledged**: `SetNameservers` holds `c.mu` across two HTTP round-trips (CSRF GET + PUT, up to ~60s combined with the 30s default `http.Client` timeout). Any concurrent goroutine calling another `*Client` method on the same instance blocks for that duration. This is correctness-over-throughput: the alternative — releasing the lock between auth and PUT — was the round-1 design and the round-2 reviewer correctly flagged it as racy. For the field-test scope (single goroutine, one `infra.dns_delegation` resource) this is harmless. For future configs that mix `infra.dns` records and `infra.dns_delegation` on the same client, the engine's per-resource dispatch will serialise through the mutex. The production hardening path (if mixed-resource throughput becomes a concern) is to cache the CSRF token at session granularity, matching `sessionStaleAfter`'s 1h window, and invalidate on 4xx PUT responses — narrowing the lock to just the PUT. Deferred until field-test reveals it's needed.
+
 ### `internal/drivers/delegation.go` (new, ~150 LoC)
 
 - `type DelegationDriver struct { client HoverDelegationClient }` where the test-injectable interface is:
@@ -148,9 +150,9 @@ wfctl Plan → DelegationDriver.Diff(desired, current)
 wfctl Apply → DelegationDriver.Create or Update
    ├── ctx.Err check
    ├── Create only: GetDomainDelegation → stash current NS as previous_nameservers (best-effort)
-   ├── client.SetNameservers (under c.mu, both CSRF GET + PUT inside the lock)
-   │   ├── ensureLogin
-   │   ├── lock c.mu
+   ├── client.SetNameservers
+   │   ├── lock c.mu (acquired FIRST)
+   │   ├── ensureLoginLocked (no separate lock; runs under held c.mu)
    │   ├── fetchControlPanelCSRFLocked → token
    │   └── PUT /api/control_panel/domains/domain-<name>
    │         Body:   {"field":"nameservers","value":[...]}
@@ -192,7 +194,7 @@ wfctl persists state. Subsequent Plans no-op until config changes.
 | A3 | No Cloudflare/CAPTCHA gate on the PUT path from a fresh GH-runner IP. | Field test fails; mitigation = self-hosted runner OR document a stable egress IP. | README already documents this as a CAPTCHA caveat on the existing DNS flow; same risk model. |
 | A4 | Hover idempotently accepts "set to same nameservers" (no-op success). | Only matters on Create-after-state-loss; Diff prevents the re-PUT in normal flow. | Inferred from typical PUT-idempotency conventions; not verified. |
 | A5 | When `previous_nameservers` is missing from state, the fallback `[ns1.hover.com, ns2.hover.com]` is a reasonable Hover default. | Delete writes wrong values for an account whose original NS set was different. User manually fixes once. | chickenandpork/hoverdnsapi test fixtures show this pair on most domains; `ns3.hover.com` exists in some fixtures. Mitigated by the primary path (stashed previous_nameservers) capturing the actual prior state. The hardcoded fallback is the last-resort path only. |
-| A6 | `GET /api/control_panel/domains/domain-<name>` returns `nameservers: [...]` in the response body. | Read returns empty; Diff false-positives on every Plan. | The PUT is on the same endpoint — same API family. Assumed to surface the field on GET, but NOT yet curl-verified. **First implementation task: live-verify this with a single curl against the captured session before writing the driver.** If it returns a different shape than expected, the implementation pauses for a design amendment. Tracking-issue placeholder. |
+| A6 | `GET /api/control_panel/domains/domain-<name>` returns a JSON object containing `nameservers: [string,...]` at the top level. | Read returns empty; `ErrEmptyNameservers` surfaces (loud). | The PUT is on the same endpoint — same API family. **Tentative envelope spec (to confirm with curl as first implementation task):** `{"id": "domain-<name>", "domain_name": "<name>", "nameservers": ["..."], ...}` — a flat object, NOT wrapped in `{"domains": [...]}` like `/api/domains/<name>/dns`. If the curl reveals a different shape, the implementer pauses + amends the design before writing the decoder struct. The `DomainDelegation` struct's JSON tags follow this tentative spec. |
 | A7 | GH-hosted runners can reach hover.com without IP-based blocking. | Workflow fails at first request; mitigation = self-hosted runner. | No known IP-based block. |
 
 ## Rollback
@@ -213,6 +215,16 @@ The change touches runtime (plugin loading + a live registrar PUT), so rollback 
 1. **CSRF-per-PUT cost**: per-PUT control_panel page fetch doubles the request count. If Hover throttles these GETs we may need to fall back to cached-with-1h-TTL CSRF. User-chosen "fetch fresh" is the safer default.
 2. **Cloudflare on GHA**: shared-IP runners can trip bot challenges. Fallback: self-hosted runner with a stable egress IP that's been allowlisted via a manual login from that IP.
 3. **A6 — Read endpoint coverage**: now mitigated by switching primary Read from `/api/domains/<name>/dns` to `/api/control_panel/domains/domain-<name>` (same API family as the PUT). Still needs live curl verification as the first implementation step.
+
+## Adversarial review round 3 — clarifications applied inline
+
+Round 3 found 0 Critical + 2 Important + 3 Minor; reviewer's own verdict was "doc clarifications, no round-4 needed — author can make them inline and proceed". Three clarifications applied:
+
+1. **Data-flow diagram fixed**: lock acquired BEFORE `ensureLoginLocked`, matching the Concurrency pseudocode (was misleading: showed lock after ensureLogin).
+2. **A6 JSON envelope spec'd tentatively**: flat object, not `{"domains":[...]}` wrapper. Curl verification gate remains the first implementation task; tentative shape gives the implementer a struct to write.
+3. **I/O-under-lock trade-off documented**: explicit acknowledgment in Concurrency section that `SetNameservers` holds `c.mu` across two HTTP round-trips (up to ~60s). Single-goroutine field-test = harmless; mixed-resource configs serialise. Production hardening path (session-scoped CSRF cache) deferred until field-test demonstrates need.
+
+`ErrEmptyNameservers` sentinel will be declared in the `internal/hover` package (driver-side `errors.Is` check); minor #1 is a plan-phase concern.
 
 ## Adversarial review round 2 — findings addressed
 
