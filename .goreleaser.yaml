@@ -6,6 +6,7 @@ before:
   hooks:
     - "sh -c \"rm -rf .release && mkdir -p .release && jq --arg v '{{ .Version }}' '.version = $v' plugin.json > .release/plugin.json\""
     - "sh -c \"jq -e --arg v '{{ .Version }}' '.version == $v' .release/plugin.json > /dev/null || (echo 'plugin.json version rewrite failed' >&2 && exit 1)\""
+    - "cp plugin.json cmd/workflow-plugin-hover/plugin.json"
 
 builds:
   - id: workflow-plugin-hover
