@@ -16,7 +16,7 @@ import (
 )
 
 // Version is set at build time via -ldflags.
-var Version = "dev"
+var Version = "0.0.0"
 
 // HoverProvider implements interfaces.IaCProvider for Hover.
 // Supports two resource types:
