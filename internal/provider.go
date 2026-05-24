@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/GoCodeAlone/workflow-plugin-hover/internal/drivers"
 	"github.com/GoCodeAlone/workflow-plugin-hover/internal/hover"
@@ -222,9 +223,42 @@ func (p *HoverProvider) DetectDrift(ctx context.Context, resources []interfaces.
 	return results, nil
 }
 
-// Import is a stub: Hover does not support resource import via cloud ID.
-func (p *HoverProvider) Import(_ context.Context, _ string, _ string) (*interfaces.ResourceState, error) {
-	return nil, fmt.Errorf("hover: Import is not supported")
+// Import reads an existing Hover-managed resource and returns IaC adoption
+// state. cloudID is the domain name for both infra.dns and infra.dns_delegation.
+func (p *HoverProvider) Import(ctx context.Context, cloudID string, resourceType string) (*interfaces.ResourceState, error) {
+	if cloudID == "" {
+		return nil, fmt.Errorf("hover import: provider_id is required")
+	}
+	if resourceType == "" {
+		resourceType = "infra.dns"
+	}
+	d, err := p.ResourceDriver(resourceType)
+	if err != nil {
+		return nil, err
+	}
+	out, err := d.Read(ctx, interfaces.ResourceRef{Name: cloudID, Type: resourceType, ProviderID: cloudID})
+	if err != nil {
+		return nil, fmt.Errorf("hover import %q: %w", cloudID, err)
+	}
+	if out == nil {
+		return nil, fmt.Errorf("hover import %q: driver returned nil output", cloudID)
+	}
+	now := time.Now()
+	id := out.ProviderID
+	if id == "" {
+		id = cloudID
+	}
+	return &interfaces.ResourceState{
+		ID:                  id,
+		Name:                out.Name,
+		Type:                out.Type,
+		Provider:            "hover",
+		ProviderID:          id,
+		AppliedConfigSource: "adoption",
+		Outputs:             out.Outputs,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}, nil
 }
 
 // ResolveSizing is a stub: Hover has no compute sizing.

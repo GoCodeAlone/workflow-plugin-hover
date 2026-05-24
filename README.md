@@ -63,6 +63,22 @@ to avoid the "I forgot the key and lost my zone" failure mode.
 `wfctl secrets setup --plugin workflow-plugin-hover` prompts for each;
 sensitive fields are masked.
 
+## Importing existing state
+
+The plugin supports read-only import for existing Hover domains:
+
+```sh
+wfctl infra import --config infra.yaml --name example-com-dns --id example.com
+wfctl infra import --config infra.yaml --name example-com-delegation --id example.com
+```
+
+Declare the target resource in config first so `wfctl` can resolve the Hover
+provider and resource type. `infra.dns` imports the zone records returned by
+Hover. `infra.dns_delegation` imports the current registrar nameservers.
+Imported state is marked as adoption-shaped state so follow-up plans can
+compare against live outputs without treating the imported record set as a
+user-authored apply config.
+
 ## TOTP
 
 In-process RFC 6238 (SHA-1, 30s step, 6 digits). The seed is decoded

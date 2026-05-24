@@ -150,11 +150,15 @@ func (s *hoverIaCServer) Status(ctx context.Context, req *pb.StatusRequest) (*pb
 }
 
 func (s *hoverIaCServer) Import(ctx context.Context, req *pb.ImportRequest) (*pb.ImportResponse, error) {
-	_, err := s.provider.Import(ctx, req.GetProviderId(), req.GetResourceType())
+	state, err := s.provider.Import(ctx, req.GetProviderId(), req.GetResourceType())
 	if err != nil {
 		return nil, err
 	}
-	return &pb.ImportResponse{}, nil
+	pbState, err := stateToPB(state)
+	if err != nil {
+		return nil, fmt.Errorf("hover iacserver: encode Import state: %w", err)
+	}
+	return &pb.ImportResponse{State: pbState}, nil
 }
 
 func (s *hoverIaCServer) ResolveSizing(_ context.Context, _ *pb.ResolveSizingRequest) (*pb.ResolveSizingResponse, error) {
