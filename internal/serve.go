@@ -10,5 +10,7 @@ import (
 // The SDK auto-registers every typed pb.IaCProvider*Server interface that
 // *hoverIaCServer satisfies via Go type-assertion at plugin startup.
 func Serve() {
-	sdk.ServeIaCPlugin(NewIaCServer(), sdk.IaCServeOptions{})
+	sdk.ServeIaCPlugin(NewIaCServer(), sdk.IaCServeOptions{
+		BuildVersion: sdk.ResolveBuildVersion(Version),
+	})
 }
