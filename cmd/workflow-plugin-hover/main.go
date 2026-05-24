@@ -7,8 +7,11 @@ package main
 
 import (
 	"github.com/GoCodeAlone/workflow-plugin-hover/internal"
+	sdk "github.com/GoCodeAlone/workflow/plugin/external/sdk"
 )
 
 func main() {
-	internal.Serve()
+	sdk.ServeIaCPlugin(internal.NewIaCServer(), sdk.IaCServeOptions{
+		BuildVersion: sdk.ResolveBuildVersion(internal.Version),
+	})
 }
