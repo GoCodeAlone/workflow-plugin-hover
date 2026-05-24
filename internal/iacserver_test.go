@@ -158,6 +158,59 @@ func TestHoverIaCServer_ResourceDriverReadAndDiff(t *testing.T) {
 	}
 }
 
+func TestHoverIaCServer_Import_ReturnsResourceState(t *testing.T) {
+	driver := &iacServerFakeDriver{
+		readOut: &interfaces.ResourceOutput{
+			Name:       "example.com",
+			Type:       "infra.dns",
+			ProviderID: "example.com",
+			Outputs: map[string]any{
+				"domain": "example.com",
+				"records": []any{
+					map[string]any{"type": "MX", "name": "@", "content": "mail.protonmail.ch", "ttl": 300},
+				},
+			},
+			Status: "active",
+		},
+	}
+	srv := &hoverIaCServer{
+		provider: &HoverProvider{drivers: map[string]interfaces.ResourceDriver{
+			"infra.dns": driver,
+		}},
+	}
+
+	resp, err := srv.Import(context.Background(), &pb.ImportRequest{ProviderId: "example.com"})
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	state := resp.GetState()
+	if state == nil {
+		t.Fatal("Import state is nil")
+	}
+	if state.GetProvider() != "hover" {
+		t.Fatalf("Provider = %q, want hover", state.GetProvider())
+	}
+	if state.GetType() != "infra.dns" {
+		t.Fatalf("Type = %q, want infra.dns", state.GetType())
+	}
+	if state.GetProviderId() != "example.com" {
+		t.Fatalf("ProviderId = %q, want example.com", state.GetProviderId())
+	}
+	if state.GetAppliedConfigSource() != "adoption" {
+		t.Fatalf("AppliedConfigSource = %q, want adoption", state.GetAppliedConfigSource())
+	}
+	outputs, err := unmarshalJSONMap(state.GetOutputsJson())
+	if err != nil {
+		t.Fatalf("outputs JSON: %v", err)
+	}
+	if outputs["domain"] != "example.com" {
+		t.Fatalf("outputs.domain = %v, want example.com", outputs["domain"])
+	}
+	if driver.readRef != (interfaces.ResourceRef{Name: "example.com", Type: "infra.dns", ProviderID: "example.com"}) {
+		t.Fatalf("driver read ref = %+v, want provider-id import ref", driver.readRef)
+	}
+}
+
 func TestHoverIaCServer_Destroy_EmptyRefs(t *testing.T) {
 	srv := NewIaCServer()
 	// Destroy with zero refs is a no-op regardless of initialization state.
