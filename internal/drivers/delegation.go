@@ -9,14 +9,14 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/GoCodeAlone/workflow-plugin-hover/internal/hover"
+	"github.com/GoCodeAlone/workflow-plugin-hover/pkg/hoverclient"
 	"github.com/GoCodeAlone/workflow/interfaces"
 )
 
-// HoverDelegationClient is the subset of *hover.Client that DelegationDriver
+// HoverDelegationClient is the subset of *hoverclient.Client that DelegationDriver
 // depends on. Injectable for tests.
 type HoverDelegationClient interface {
-	GetDomainDelegation(ctx context.Context, domain string) (*hover.DomainDelegation, error)
+	GetDomainDelegation(ctx context.Context, domain string) (*hoverclient.DomainDelegation, error)
 	SetNameservers(ctx context.Context, domain string, ns []string) error
 }
 
@@ -26,15 +26,15 @@ type HoverDelegationClient interface {
 // ProviderID = apex domain name (e.g. "example.com"). One resource = one
 // domain. Outputs contain only the desired nameservers as []any
 // (structpb-safe). v0.2.0 ships Delete = reset to Hover defaults
-// [ns1.hover.com, ns2.hover.com]; restore-from-stash is deferred to
+// [ns1.hoverclient.com, ns2.hoverclient.com]; restore-from-stash is deferred to
 // v0.3.0 because interfaces.ResourceRef has no state channel.
 type DelegationDriver struct {
 	client     HoverDelegationClient
 	nsResolver func(context.Context, string) ([]string, error)
 }
 
-// NewDelegationDriver returns a DelegationDriver bound to a real *hover.Client.
-func NewDelegationDriver(c *hover.Client) *DelegationDriver {
+// NewDelegationDriver returns a DelegationDriver bound to a real *hoverclient.Client.
+func NewDelegationDriver(c *hoverclient.Client) *DelegationDriver {
 	return &DelegationDriver{client: c, nsResolver: lookupPublicNameservers}
 }
 
@@ -238,7 +238,7 @@ func (d *DelegationDriver) Update(ctx context.Context, ref interfaces.ResourceRe
 // hoverDefaultNameservers is the Delete target for v0.2.0 (per A5).
 // ResourceRef has no state channel for previous_nameservers restore;
 // that enhancement is v0.3.0 follow-up territory.
-var hoverDefaultNameservers = []string{"ns1.hover.com", "ns2.hover.com"}
+var hoverDefaultNameservers = []string{"ns1.hoverclient.com", "ns2.hoverclient.com"}
 
 // Delete resets the registrar nameservers to Hover's defaults.
 // Operators whose domains had non-default originals must restore

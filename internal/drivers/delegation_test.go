@@ -6,19 +6,19 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/GoCodeAlone/workflow-plugin-hover/internal/hover"
+	"github.com/GoCodeAlone/workflow-plugin-hover/pkg/hoverclient"
 	"github.com/GoCodeAlone/workflow/interfaces"
 )
 
 type fakeDelegationClient struct {
-	getResult *hover.DomainDelegation
+	getResult *hoverclient.DomainDelegation
 	getErr    error
 	getCalls  int
 	setErr    error
 	lastSetNS []string
 }
 
-func (f *fakeDelegationClient) GetDomainDelegation(_ context.Context, _ string) (*hover.DomainDelegation, error) {
+func (f *fakeDelegationClient) GetDomainDelegation(_ context.Context, _ string) (*hoverclient.DomainDelegation, error) {
 	f.getCalls++
 	return f.getResult, f.getErr
 }
@@ -122,7 +122,7 @@ func TestDelegationDriver_Create_DuplicateNameservers_Rejected(t *testing.T) {
 
 func TestDelegationDriver_Read_HappyPath(t *testing.T) {
 	fc := &fakeDelegationClient{
-		getResult: &hover.DomainDelegation{
+		getResult: &hoverclient.DomainDelegation{
 			ID:          "domain-example.com",
 			Name:        "example.com",
 			Nameservers: []string{"ns1.do.com", "ns2.do.com"},
@@ -196,7 +196,7 @@ func TestDelegationDriver_Read_PropagatesError(t *testing.T) {
 
 func TestDelegationDriver_Update_HappyPath(t *testing.T) {
 	fc := &fakeDelegationClient{
-		getResult: &hover.DomainDelegation{
+		getResult: &hoverclient.DomainDelegation{
 			ID: "domain-example.com", Name: "example.com",
 			Nameservers: []string{"ns1.do.com", "ns2.do.com"},
 		},
@@ -256,8 +256,8 @@ func TestDelegationDriver_Delete_ResetsToHoverDefaults(t *testing.T) {
 	if err := d.Delete(context.Background(), ref); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if len(fc.lastSetNS) != 2 || fc.lastSetNS[0] != "ns1.hover.com" || fc.lastSetNS[1] != "ns2.hover.com" {
-		t.Errorf("Delete set NS = %v, want [ns1.hover.com ns2.hover.com]", fc.lastSetNS)
+	if len(fc.lastSetNS) != 2 || fc.lastSetNS[0] != "ns1.hoverclient.com" || fc.lastSetNS[1] != "ns2.hoverclient.com" {
+		t.Errorf("Delete set NS = %v, want [ns1.hoverclient.com ns2.hoverclient.com]", fc.lastSetNS)
 	}
 }
 
@@ -380,7 +380,7 @@ func TestDelegationDriver_Diff_DomainChange_NeedsReplace(t *testing.T) {
 
 func TestDelegationDriver_HealthCheck_Healthy(t *testing.T) {
 	fc := &fakeDelegationClient{
-		getResult: &hover.DomainDelegation{
+		getResult: &hoverclient.DomainDelegation{
 			ID: "domain-example.com", Name: "example.com",
 			Nameservers: []string{"a.com", "b.com"},
 		},
@@ -449,20 +449,20 @@ func TestDelegationDriver_CtxCanceled_AllMethods(t *testing.T) {
 }
 
 func TestDelegationDriver_Read_PropagatesErrEmptyNameservers(t *testing.T) {
-	// Callers using errors.Is(driverErr, hover.ErrEmptyNameservers) to
+	// Callers using errors.Is(driverErr, hoverclient.ErrEmptyNameservers) to
 	// distinguish "Hover surfaced 0 nameservers" from other failures need
 	// the sentinel to survive the driver's error wrap. This test defends
 	// that contract.
 	fc := &fakeDelegationClient{
-		getErr: fmt.Errorf("hover: GetDomainDelegation %q: %w", "example.com", hover.ErrEmptyNameservers),
+		getErr: fmt.Errorf("hover: GetDomainDelegation %q: %w", "example.com", hoverclient.ErrEmptyNameservers),
 	}
 	d := NewDelegationDriverWithClient(fc)
 	_, err := d.Read(context.Background(), interfaces.ResourceRef{Name: "example.com", ProviderID: "example.com"})
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !errors.Is(err, hover.ErrEmptyNameservers) {
-		t.Errorf("errors.Is should match hover.ErrEmptyNameservers through driver wrap; got %v", err)
+	if !errors.Is(err, hoverclient.ErrEmptyNameservers) {
+		t.Errorf("errors.Is should match hoverclient.ErrEmptyNameservers through driver wrap; got %v", err)
 	}
 }
 

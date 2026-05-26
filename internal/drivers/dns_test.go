@@ -6,14 +6,14 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/GoCodeAlone/workflow-plugin-hover/internal/hover"
+	"github.com/GoCodeAlone/workflow-plugin-hover/pkg/hoverclient"
 	"github.com/GoCodeAlone/workflow/interfaces"
 )
 
 // fakeClient is a test double for HoverDNSClient.
 type fakeClient struct {
 	domainID  string // hover-assigned domain ID returned by GetDomain
-	records   []hover.DNSRecord
+	records   []hoverclient.DNSRecord
 	createErr error
 	updateErr error
 	deleteErr error
@@ -23,7 +23,7 @@ type fakeClient struct {
 	lastCreateDomainID string // captured for assertions
 }
 
-func (f *fakeClient) GetDomain(_ context.Context, domain string) (*hover.Domain, error) {
+func (f *fakeClient) GetDomain(_ context.Context, domain string) (*hoverclient.Domain, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -31,21 +31,21 @@ func (f *fakeClient) GetDomain(_ context.Context, domain string) (*hover.Domain,
 	if id == "" {
 		id = "dom1"
 	}
-	recs := make([]hover.DNSRecord, len(f.records))
+	recs := make([]hoverclient.DNSRecord, len(f.records))
 	copy(recs, f.records)
-	return &hover.Domain{ID: id, Name: domain, Records: recs}, nil
+	return &hoverclient.Domain{ID: id, Name: domain, Records: recs}, nil
 }
 
-func (f *fakeClient) ListRecords(_ context.Context, _ string) ([]hover.DNSRecord, error) {
+func (f *fakeClient) ListRecords(_ context.Context, _ string) ([]hoverclient.DNSRecord, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
-	out := make([]hover.DNSRecord, len(f.records))
+	out := make([]hoverclient.DNSRecord, len(f.records))
 	copy(out, f.records)
 	return out, nil
 }
 
-func (f *fakeClient) CreateRecord(_ context.Context, domainID string, rec hover.DNSRecord) (*hover.DNSRecord, error) {
+func (f *fakeClient) CreateRecord(_ context.Context, domainID string, rec hoverclient.DNSRecord) (*hoverclient.DNSRecord, error) {
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
@@ -57,7 +57,7 @@ func (f *fakeClient) CreateRecord(_ context.Context, domainID string, rec hover.
 	return &cp, nil
 }
 
-func (f *fakeClient) UpdateRecord(_ context.Context, id string, rec hover.DNSRecord) error {
+func (f *fakeClient) UpdateRecord(_ context.Context, id string, rec hoverclient.DNSRecord) error {
 	if f.updateErr != nil {
 		return f.updateErr
 	}
@@ -86,7 +86,7 @@ func (f *fakeClient) DeleteRecord(_ context.Context, id string) error {
 	return fmt.Errorf("record %q not found", id)
 }
 
-func newDriver(records ...hover.DNSRecord) (*DNSDriver, *fakeClient) {
+func newDriver(records ...hoverclient.DNSRecord) (*DNSDriver, *fakeClient) {
 	fc := &fakeClient{records: records}
 	return NewDNSDriverWithClient(fc), fc
 }
@@ -138,7 +138,7 @@ func TestDNSDriver_Create_WithRecords(t *testing.T) {
 }
 
 func TestDNSDriver_Create_UpdatesExistingRecord(t *testing.T) {
-	existing := hover.DNSRecord{ID: "r1", Type: "A", Name: "@", Content: "1.1.1.1", TTL: 300}
+	existing := hoverclient.DNSRecord{ID: "r1", Type: "A", Name: "@", Content: "1.1.1.1", TTL: 300}
 	d, fc := newDriver(existing)
 
 	spec := interfaces.ResourceSpec{
@@ -278,7 +278,7 @@ func TestDNSDriver_Update_DomainRenameRejected(t *testing.T) {
 }
 
 func TestDNSDriver_Delete_NoOp(t *testing.T) {
-	d, _ := newDriver(hover.DNSRecord{ID: "r1", Type: "A", Name: "@", Content: "1.1.1.1"})
+	d, _ := newDriver(hoverclient.DNSRecord{ID: "r1", Type: "A", Name: "@", Content: "1.1.1.1"})
 	err := d.Delete(context.Background(), interfaces.ResourceRef{Name: "example.com", ProviderID: "example.com"})
 	if err != nil {
 		t.Fatalf("Delete: %v", err)
@@ -342,11 +342,11 @@ func TestDeclaredRecords_MissingType(t *testing.T) {
 }
 
 func TestDNSOutput_Structpb(t *testing.T) {
-	records := []hover.DNSRecord{
+	records := []hoverclient.DNSRecord{
 		{ID: "r1", Type: "A", Name: "@", Content: "1.2.3.4", TTL: 300},
 	}
 	out := dnsOutput("example.com", "my-zone", records)
-	// outputs["records"] must be []any, not []hover.DNSRecord,
+	// outputs["records"] must be []any, not []hoverclient.DNSRecord,
 	// to be structpb-safe.
 	recs, ok := out.Outputs["records"].([]any)
 	if !ok {
@@ -560,7 +560,7 @@ func TestDiff_EmptyDesired_WithCurrentRecords_NeedsUpdate(t *testing.T) {
 // removed records as orphans upstream.
 func TestUpsertRecords_PrunesExtraRecords(t *testing.T) {
 	fc := &fakeClient{
-		records: []hover.DNSRecord{
+		records: []hoverclient.DNSRecord{
 			{ID: "r1", Type: "A", Name: "@", Content: "1.1.1.1"},
 			{ID: "r2", Type: "A", Name: "www", Content: "1.1.1.1"}, // orphan
 		},
@@ -587,7 +587,7 @@ func TestUpsertRecords_PrunesExtraRecords(t *testing.T) {
 
 func TestUpsertRecords_EmptyDesiredDeletesAll(t *testing.T) {
 	fc := &fakeClient{
-		records: []hover.DNSRecord{
+		records: []hoverclient.DNSRecord{
 			{ID: "r1", Type: "A", Name: "@", Content: "1.1.1.1"},
 			{ID: "r2", Type: "A", Name: "www", Content: "1.1.1.1"},
 		},
