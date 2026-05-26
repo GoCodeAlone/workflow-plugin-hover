@@ -1,4 +1,4 @@
-package hover
+package hoverclient
 
 import (
 	"strings"

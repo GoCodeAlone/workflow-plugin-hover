@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/GoCodeAlone/workflow-plugin-hover/internal/drivers"
-	"github.com/GoCodeAlone/workflow-plugin-hover/internal/hover"
+	"github.com/GoCodeAlone/workflow-plugin-hover/pkg/hoverclient"
 	"github.com/GoCodeAlone/workflow/interfaces"
 	"github.com/GoCodeAlone/workflow/platform"
 )
@@ -24,7 +24,7 @@ var Version = "0.0.0"
 //   - infra.dns           — DNS records within Hover's nameservers.
 //   - infra.dns_delegation — registrar-level nameserver delegation.
 type HoverProvider struct {
-	client  *hover.Client
+	client  *hoverclient.Client
 	drivers map[string]interfaces.ResourceDriver
 }
 
@@ -58,21 +58,21 @@ func (p *HoverProvider) Initialize(ctx context.Context, config map[string]any) e
 		return fmt.Errorf("hover: missing required config key 'password'")
 	}
 
-	var totpSecret hover.TOTPSecret
+	var totpSecret hoverclient.TOTPSecret
 	if totpRaw != "" {
-		ts, err := hover.ParseBase32(totpRaw)
+		ts, err := hoverclient.ParseBase32(totpRaw)
 		if err != nil {
 			return fmt.Errorf("hover: invalid totp_secret: %w", err)
 		}
 		totpSecret = ts
 	}
 
-	creds := hover.Credentials{
+	creds := hoverclient.Credentials{
 		Username:   username,
 		Password:   password,
 		TOTPSecret: totpSecret,
 	}
-	c, err := hover.NewClient(creds, nil)
+	c, err := hoverclient.NewClient(creds, nil)
 	if err != nil {
 		return fmt.Errorf("hover: client init: %w", err)
 	}

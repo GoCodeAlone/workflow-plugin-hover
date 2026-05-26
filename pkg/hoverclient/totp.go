@@ -1,4 +1,4 @@
-// Package hover implements the Hover DNS provider client.
+// Package hoverclient implements the Hover DNS provider client.
 //
 // Hover ships no official API. This package mimics the browser-side
 // authentication flow exposed by Hover's signin UI:
@@ -8,7 +8,7 @@
 //  3. Subsequent requests carry the session cookie jar.
 //
 // TOTP codes are RFC 6238 (HMAC-SHA1, 30s window, 6 digits).
-package hover
+package hoverclient
 
 import (
 	"crypto/hmac"
