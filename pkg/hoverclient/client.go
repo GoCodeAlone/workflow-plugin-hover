@@ -360,6 +360,48 @@ func (c *Client) putNameserversLocked(ctx context.Context, domainName string, ns
 	return nil
 }
 
+// ListDomains fetches every domain in the authenticated account via the
+// account-level GET /api/domains endpoint. The returned slice is the
+// inverse-key of the SetNameservers / GetDomainDelegation / GetDomain
+// surface (which all operate on a single named zone) — callers iterate
+// the list to drive cross-zone operations like
+// IaCProviderEnumerator.EnumerateAll("infra.dns").
+//
+// CSRF is not required for GET requests under Hover's API; ensureLogin
+// is still called so the session cookie is fresh.
+func (c *Client) ListDomains(ctx context.Context) ([]Domain, error) {
+	if err := c.ensureLogin(ctx); err != nil {
+		return nil, fmt.Errorf("hover: ListDomains: login: %w", err)
+	}
+	endpoint := hoverHost + "/api/domains"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("hover: ListDomains: build request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", c.UserAgent)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("hover: ListDomains: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("hover: ListDomains: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var body struct {
+		Succeeded bool     `json:"succeeded"`
+		Domains   []Domain `json:"domains"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, fmt.Errorf("hover: ListDomains: decode: %w", err)
+	}
+	if !body.Succeeded {
+		return nil, fmt.Errorf("hover: ListDomains: API returned succeeded=false")
+	}
+	return body.Domains, nil
+}
+
 // GetDomain returns the full Domain struct (including the
 // hover-assigned ID) for the named zone. The ID is required when
 // creating new records via CreateRecord; the human-readable name is

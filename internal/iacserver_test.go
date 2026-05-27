@@ -2,8 +2,10 @@ package internal
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
+	"github.com/GoCodeAlone/workflow-plugin-hover/pkg/hoverclient"
 	"github.com/GoCodeAlone/workflow/interfaces"
 	pb "github.com/GoCodeAlone/workflow/plugin/external/proto"
 )
@@ -261,3 +263,44 @@ func (d *iacServerFakeDriver) Scale(_ context.Context, ref interfaces.ResourceRe
 }
 
 func (d *iacServerFakeDriver) SensitiveKeys() []string { return nil }
+
+// ── EnumerateAll gRPC coverage ─────────────────────────────────────────────
+
+// TestHoverIaCServer_EnumerateAll_DNS exercises the typed gRPC surface
+// (hoverIaCServer.EnumerateAll). The SDK auto-registers this service at
+// plugin startup because hoverIaCServer embeds the Unimplemented*Enumerator
+// stub and overrides EnumerateAll. This test confirms the proto<->Go
+// marshalling round-trips zone + domain_id outputs.
+func TestHoverIaCServer_EnumerateAll_DNS(t *testing.T) {
+	srv := &hoverIaCServer{
+		provider: &HoverProvider{
+			domains: &fakeHoverClient{
+				domains: []hoverclient.Domain{
+					{ID: "dom-1", Name: "alpha.test"},
+					{ID: "dom-2", Name: "beta.test"},
+				},
+			},
+		},
+	}
+	resp, err := srv.EnumerateAll(context.Background(), &pb.EnumerateAllRequest{ResourceType: "infra.dns"})
+	if err != nil {
+		t.Fatalf("EnumerateAll: %v", err)
+	}
+	if len(resp.GetOutputs()) != 2 {
+		t.Fatalf("want 2 outputs; got %d", len(resp.GetOutputs()))
+	}
+	first := resp.GetOutputs()[0]
+	if first.GetProviderId() != "alpha.test" {
+		t.Errorf("providerID = %q; want alpha.test", first.GetProviderId())
+	}
+	if first.GetType() != "infra.dns" {
+		t.Errorf("type = %q; want infra.dns", first.GetType())
+	}
+	var outputs map[string]any
+	if err := json.Unmarshal(first.GetOutputsJson(), &outputs); err != nil {
+		t.Fatalf("unmarshal outputs: %v", err)
+	}
+	if outputs["zone"] != "alpha.test" || outputs["domain_id"] != "dom-1" {
+		t.Errorf("outputs = %#v", outputs)
+	}
+}

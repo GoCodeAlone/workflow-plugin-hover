@@ -598,6 +598,72 @@ func TestClient_ListRecords_DomainNotFound(t *testing.T) {
 	}
 }
 
+// ── ListDomains coverage ───────────────────────────────────────────────────
+
+// TestClient_ListDomains verifies the GET /api/domains path returns the
+// deserialized []Domain. Hover's account-level endpoint is the prerequisite
+// for the upstream IaCProviderEnumerator.EnumerateAll path (cross-repo
+// cascade docs/plans/2026-05-26-dns-provider-contract.md).
+func TestClient_ListDomains(t *testing.T) {
+	respBody := `{
+		"succeeded": true,
+		"domains": [
+			{"id": "dom1", "domain_name": "alpha.test"},
+			{"id": "dom2", "domain_name": "beta.test"}
+		]
+	}`
+	c, srv := newRecordStub(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/domains" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = io.WriteString(w, respBody)
+	})
+	defer srv.Close()
+	domains, err := c.ListDomains(context.Background())
+	if err != nil {
+		t.Fatalf("ListDomains: %v", err)
+	}
+	if len(domains) != 2 {
+		t.Fatalf("want 2 domains; got %d", len(domains))
+	}
+	if domains[0].Name != "alpha.test" || domains[0].ID != "dom1" {
+		t.Errorf("domains[0] = %+v", domains[0])
+	}
+	if domains[1].Name != "beta.test" || domains[1].ID != "dom2" {
+		t.Errorf("domains[1] = %+v", domains[1])
+	}
+}
+
+// TestClient_ListDomains_HTTPError surfaces non-2xx as a Go error rather
+// than returning an empty slice (which would silently look like an empty
+// account).
+func TestClient_ListDomains_HTTPError(t *testing.T) {
+	c, srv := newRecordStub(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, "boom")
+	})
+	defer srv.Close()
+	_, err := c.ListDomains(context.Background())
+	if err == nil {
+		t.Fatalf("want HTTP-error; got nil")
+	}
+}
+
+// TestClient_ListDomains_APIFalseSucceeded guards against the body-level
+// {"succeeded": false} signal (Hover's API contract): even with HTTP 200,
+// false succeeded must surface as an error so callers don't act on stale
+// state.
+func TestClient_ListDomains_APIFalseSucceeded(t *testing.T) {
+	c, srv := newRecordStub(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"succeeded": false, "domains": []}`)
+	})
+	defer srv.Close()
+	_, err := c.ListDomains(context.Background())
+	if err == nil {
+		t.Fatalf("want succeeded=false error; got nil")
+	}
+}
+
 func TestExtractCSRFMeta_AttributeOrders(t *testing.T) {
 	cases := []struct{ name, html, want string }{
 		{"name-first double quotes", `<meta name="csrf-token" content="abc">`, "abc"},

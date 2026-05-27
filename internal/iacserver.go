@@ -175,6 +175,40 @@ func (s *hoverIaCServer) FinalizeApply(_ context.Context, _ *pb.FinalizeApplyReq
 	return &pb.FinalizeApplyResponse{}, nil
 }
 
+// EnumerateAll satisfies pb.IaCProviderEnumeratorServer.EnumerateAll. Mirrors
+// the Go-level interfaces.EnumeratorAll on *HoverProvider so the wfctl
+// `infra import-all` path can list every Hover-registered zone in one
+// account-level round-trip.
+func (s *hoverIaCServer) EnumerateAll(ctx context.Context, req *pb.EnumerateAllRequest) (*pb.EnumerateAllResponse, error) {
+	outs, err := s.provider.EnumerateAll(ctx, req.GetResourceType())
+	if err != nil {
+		return nil, err
+	}
+	pbOuts := make([]*pb.ResourceOutput, 0, len(outs))
+	for _, o := range outs {
+		if o == nil {
+			continue
+		}
+		outputsJSON, err := json.Marshal(o.Outputs)
+		if err != nil {
+			return nil, fmt.Errorf("hover iacserver: encode EnumerateAll outputs: %w", err)
+		}
+		sensitive := make(map[string]bool, len(o.Sensitive))
+		for k, v := range o.Sensitive {
+			sensitive[k] = v
+		}
+		pbOuts = append(pbOuts, &pb.ResourceOutput{
+			Name:        o.Name,
+			Type:        o.Type,
+			ProviderId:  o.ProviderID,
+			OutputsJson: outputsJSON,
+			Sensitive:   sensitive,
+			Status:      o.Status,
+		})
+	}
+	return &pb.EnumerateAllResponse{Outputs: pbOuts}, nil
+}
+
 // ── Drift detection ───────────────────────────────────────────────────────────
 
 func (s *hoverIaCServer) DetectDrift(ctx context.Context, req *pb.DetectDriftRequest) (*pb.DetectDriftResponse, error) {

@@ -19,6 +19,14 @@ import (
 // Version is set at build time via -ldflags.
 var Version = "0.0.0"
 
+// hoverDomainLister is the minimal account-level surface EnumerateAll needs.
+// *hoverclient.Client satisfies this interface via the ListDomains method
+// added in pkg/hoverclient; the test fake (fakeHoverClient) satisfies it
+// the same way without spinning up the real login flow.
+type hoverDomainLister interface {
+	ListDomains(ctx context.Context) ([]hoverclient.Domain, error)
+}
+
 // HoverProvider implements interfaces.IaCProvider for Hover.
 // Supports two resource types:
 //   - infra.dns           — DNS records within Hover's nameservers.
@@ -26,6 +34,10 @@ var Version = "0.0.0"
 type HoverProvider struct {
 	client  *hoverclient.Client
 	drivers map[string]interfaces.ResourceDriver
+	// domains is the injected account-level domain lister used by EnumerateAll.
+	// Defaults to client (which now satisfies hoverDomainLister); tests
+	// override with a fakeHoverClient.
+	domains hoverDomainLister
 }
 
 var _ interfaces.IaCProvider = (*HoverProvider)(nil)
@@ -78,6 +90,7 @@ func (p *HoverProvider) Initialize(ctx context.Context, config map[string]any) e
 	}
 
 	p.client = c
+	p.domains = c
 	p.drivers = map[string]interfaces.ResourceDriver{
 		"infra.dns":            drivers.NewDNSDriver(c),
 		"infra.dns_delegation": drivers.NewDelegationDriver(c),
@@ -279,6 +292,44 @@ func (p *HoverProvider) SupportedCanonicalKeys() []string {
 
 // Close is a no-op; the HTTP client has no persistent connections to tear down.
 func (p *HoverProvider) Close() error { return nil }
+
+// EnumerateAll implements interfaces.EnumeratorAll for resource type
+// "infra.dns". Walks the account's zones via the injected hoverDomainLister
+// (production wraps *hoverclient.Client.ListDomains — added in pkg/hoverclient
+// for the cross-repo cascade). Each *ResourceOutput carries the zone name +
+// hover-assigned domain_id so the downstream IaCProvider.Import path can
+// adopt the zone without re-querying the account list.
+//
+// Domains with empty Name are dropped rather than emitted with empty
+// ProviderID — guards against bogus state-store entries if the Hover
+// account-page ever returns a malformed row.
+func (p *HoverProvider) EnumerateAll(ctx context.Context, resourceType string) ([]*interfaces.ResourceOutput, error) {
+	if p.domains == nil {
+		return nil, fmt.Errorf("hover: EnumerateAll called on provider that is not initialized — call Initialize first")
+	}
+	if resourceType != "infra.dns" {
+		return nil, fmt.Errorf("hover: EnumerateAll: resource type %q not supported", resourceType)
+	}
+	domains, err := p.domains.ListDomains(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("hover: EnumerateAll infra.dns: %w", err)
+	}
+	out := make([]*interfaces.ResourceOutput, 0, len(domains))
+	for _, d := range domains {
+		if d.Name == "" {
+			continue
+		}
+		out = append(out, &interfaces.ResourceOutput{
+			ProviderID: d.Name,
+			Type:       "infra.dns",
+			Outputs: map[string]any{
+				"zone":      d.Name,
+				"domain_id": d.ID,
+			},
+		})
+	}
+	return out, nil
+}
 
 // isNotFound recognises a "resource doesn't exist upstream" error.
 // The driver wraps these with interfaces.ErrResourceNotFound, so

@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/GoCodeAlone/workflow-plugin-hover/pkg/hoverclient"
 	"github.com/GoCodeAlone/workflow/interfaces"
 )
 
@@ -110,4 +111,91 @@ func (d *noopCreateDriver) Scale(context.Context, interfaces.ResourceRef, int) (
 
 func (d *noopCreateDriver) SensitiveKeys() []string {
 	return nil
+}
+
+// ── EnumerateAll(infra.dns) coverage ────────────────────────────────────────
+
+// fakeHoverClient is a slice-backed hoverDomainLister used to drive
+// EnumerateAll tests without touching the real hoverclient.Client (which
+// requires a live login flow).
+type fakeHoverClient struct {
+	domains []hoverclient.Domain
+	err     error
+	calls   int
+}
+
+func (f *fakeHoverClient) ListDomains(_ context.Context) ([]hoverclient.Domain, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.domains, nil
+}
+
+func TestHoverProvider_EnumerateAll_DNS(t *testing.T) {
+	stub := &fakeHoverClient{
+		domains: []hoverclient.Domain{
+			// hoverclient.Domain.Name is the Go field (json tag is "domain_name").
+			{ID: "dom-1", Name: "alpha.test"},
+			{ID: "dom-2", Name: "beta.test"},
+		},
+	}
+	p := &HoverProvider{domains: stub}
+	out, err := p.EnumerateAll(context.Background(), "infra.dns")
+	if err != nil {
+		t.Fatalf("EnumerateAll: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("want 2; got %d", len(out))
+	}
+	if out[0].ProviderID != "alpha.test" {
+		t.Errorf("providerID[0] = %q; want alpha.test", out[0].ProviderID)
+	}
+	if out[0].Type != "infra.dns" {
+		t.Errorf("type[0] = %q; want infra.dns", out[0].Type)
+	}
+	if out[0].Outputs["zone"] != "alpha.test" {
+		t.Errorf("zone[0] = %v", out[0].Outputs["zone"])
+	}
+	if out[0].Outputs["domain_id"] != "dom-1" {
+		t.Errorf("domain_id[0] = %v", out[0].Outputs["domain_id"])
+	}
+	if stub.calls != 1 {
+		t.Errorf("ListDomains called %d times; want 1", stub.calls)
+	}
+}
+
+func TestHoverProvider_EnumerateAll_DNS_uninitialized(t *testing.T) {
+	p := &HoverProvider{}
+	_, err := p.EnumerateAll(context.Background(), "infra.dns")
+	if err == nil {
+		t.Fatalf("want uninitialized error; got nil")
+	}
+}
+
+func TestHoverProvider_EnumerateAll_DNS_unsupportedType(t *testing.T) {
+	p := &HoverProvider{domains: &fakeHoverClient{}}
+	_, err := p.EnumerateAll(context.Background(), "infra.compute")
+	if err == nil {
+		t.Fatalf("want unsupported-type error; got nil")
+	}
+}
+
+// TestHoverProvider_EnumerateAll_DNS_skipsBlankName ensures zones with empty
+// Name strings are dropped rather than emitted with empty ProviderID.
+func TestHoverProvider_EnumerateAll_DNS_skipsBlankName(t *testing.T) {
+	stub := &fakeHoverClient{
+		domains: []hoverclient.Domain{
+			{ID: "dom-empty", Name: ""},
+			{ID: "dom-real", Name: "real.test"},
+		},
+	}
+	p := &HoverProvider{domains: stub}
+	out, err := p.EnumerateAll(context.Background(), "infra.dns")
+	if err != nil {
+		t.Fatalf("EnumerateAll: %v", err)
+	}
+	if len(out) != 1 || out[0].ProviderID != "real.test" {
+		t.Fatalf("want 1 entry with ProviderID=real.test; got %+v", out)
+	}
 }
