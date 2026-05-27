@@ -19,6 +19,14 @@ import (
 // Version is set at build time via -ldflags.
 var Version = "0.0.0"
 
+// hoverDomainLister is the minimal account-level surface EnumerateAll needs.
+// *hoverclient.Client satisfies this interface via the ListDomains method
+// added in pkg/hoverclient; the test fake (fakeHoverClient) satisfies it
+// the same way without spinning up the real login flow.
+type hoverDomainLister interface {
+	ListDomains(ctx context.Context) ([]hoverclient.Domain, error)
+}
+
 // HoverProvider implements interfaces.IaCProvider for Hover.
 // Supports two resource types:
 //   - infra.dns           — DNS records within Hover's nameservers.
@@ -26,6 +34,10 @@ var Version = "0.0.0"
 type HoverProvider struct {
 	client  *hoverclient.Client
 	drivers map[string]interfaces.ResourceDriver
+	// domains is the injected account-level domain lister used by EnumerateAll.
+	// Defaults to client (which now satisfies hoverDomainLister); tests
+	// override with a fakeHoverClient.
+	domains hoverDomainLister
 }
 
 var _ interfaces.IaCProvider = (*HoverProvider)(nil)
@@ -78,6 +90,7 @@ func (p *HoverProvider) Initialize(ctx context.Context, config map[string]any) e
 	}
 
 	p.client = c
+	p.domains = c
 	p.drivers = map[string]interfaces.ResourceDriver{
 		"infra.dns":            drivers.NewDNSDriver(c),
 		"infra.dns_delegation": drivers.NewDelegationDriver(c),
