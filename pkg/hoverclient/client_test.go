@@ -166,6 +166,17 @@ func TestClient_Login_UsesBrowserSigninShape(t *testing.T) {
 	if got := headers.Get("User-Agent"); !strings.Contains(got, "Mozilla/5.0") {
 		t.Errorf("User-Agent = %q, want browser-like UA", got)
 	}
+	// Anti-bot fingerprint headers a real Chrome XHR sends. Hover's signin
+	// rejects bare (botty) requests; do not drop these.
+	if got := headers.Get("Sec-Fetch-Mode"); got != "cors" {
+		t.Errorf("Sec-Fetch-Mode = %q, want cors", got)
+	}
+	if got := headers.Get("Sec-Ch-Ua"); !strings.Contains(got, "Chrome") {
+		t.Errorf("Sec-Ch-Ua = %q, want a Chrome client-hint", got)
+	}
+	if got := headers.Get("Accept-Language"); got == "" {
+		t.Error("Accept-Language must be set (browser-consistent)")
+	}
 }
 
 func TestNewClient_NormalizesPastedSecretNewlines(t *testing.T) {

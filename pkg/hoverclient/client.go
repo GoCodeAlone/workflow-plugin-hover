@@ -18,7 +18,7 @@ import (
 
 const (
 	hoverHost         = "https://www.hover.com"
-	defaultUserAgent  = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+	defaultUserAgent  = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 	sessionStaleAfter = 1 * time.Hour
 )
 
@@ -198,12 +198,24 @@ func (c *Client) postLoginJSON(ctx context.Context, urlStr string, payload map[s
 	if err != nil {
 		return signinResponse{}, err
 	}
-	req.Header.Set("Accept", "application/json")
+	// Browser-consistent headers. A bare UA + Referer reads as a bot to
+	// Hover's signin protection; match what Chrome actually sends for a
+	// same-origin XHR — client hints (sec-ch-ua) + fetch metadata
+	// (Sec-Fetch-*) + Accept-Language — kept consistent with the macOS
+	// Chrome UA in defaultUserAgent.
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
 	req.Header.Set("Origin", hoverHost)
 	req.Header.Set("Referer", hoverHost+"/signin")
 	req.Header.Set("User-Agent", c.UserAgent)
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Ch-Ua", `"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"`)
+	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
+	req.Header.Set("Sec-Ch-Ua-Platform", `"macOS"`)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return signinResponse{}, err
