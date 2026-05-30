@@ -143,8 +143,16 @@ func TestClient_Login_UsesBrowserSigninShape(t *testing.T) {
 		t.Fatalf("Login: %v", err)
 	}
 
-	if _, ok := authBody["token"]; !ok {
+	// Regression guard (do not weaken to a key-presence check): token MUST
+	// be JSON null, not "". A non-null token — including the empty string —
+	// routes Hover's auth.json to its "magic token" sign-in path, which
+	// fails an empty token with a generic "Invalid username or password"
+	// even when username + password are correct. Sending "" cost a
+	// multi-day live debugging session. See client.go ensureLoginLocked.
+	if v, ok := authBody["token"]; !ok {
 		t.Fatalf("auth body missing token field: %#v", authBody)
+	} else if v != nil {
+		t.Fatalf("token must be JSON null, got %#v — a non-null token (incl. \"\") triggers magic-token signin and 401s with valid creds", v)
 	}
 	if got := headers.Get("Origin"); got != hoverHost {
 		t.Errorf("Origin = %q, want %q", got, hoverHost)
