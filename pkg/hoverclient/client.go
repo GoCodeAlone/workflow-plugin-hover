@@ -102,7 +102,12 @@ func (c *Client) ensureLoginLocked(ctx context.Context) error {
 		"username": c.creds.Username,
 		"password": c.creds.Password,
 		"remember": false,
-		"token":    "",
+		// token MUST be JSON null, not "". Hover's signin branches on this
+		// field for its "magic token" sign-in: a non-null token (even "")
+		// routes to magic-token validation, which fails an empty token with
+		// a generic "Invalid username or password." The browser sends null
+		// for password sign-in; match it exactly (verified via DevTools).
+		"token": nil,
 	})
 	if err != nil {
 		return fmt.Errorf("hover signin step 1: %w", err)
