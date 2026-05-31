@@ -106,7 +106,9 @@ Runtime-affecting (auth path + new browser dependency + CI). Rollback path:
 
 ## Re-evaluation cadence
 
-Per user: re-check for maintained Imperva-bypass solutions periodically (next: ~2026-05-30 search done — no maintained Go lib; revisit if go-rod stealth proves insufficient or breaks). Record findings in the retro.
+Per user: re-check for maintained Imperva-bypass solutions periodically. Record findings in the retro.
+
+**2026-05-30 re-check (done):** No maintained **Go-native** Imperva-bypass library exists. The only actively-maintained Go headless drivers are chromedp, playwright-go, and go-rod — all general CDP drivers, none stealth-specialized. The 2026 SOTA stealth tools (Camoufox, nodriver, patchright, CloakBrowser) are **all Python/Node**, confirming ADR 0001's rejection of cross-language tooling for a Go gRPC plugin. New 2026 Imperva signals — JA4 TLS fingerprinting + *mandatory* UA-Client-Hints consistency with the declared UA + sequential challenge escalation — **reinforce the full-browser default** (handing cookies to Go's `http.Client` exposes a non-Chrome JA4/TLS shape; in-browser keeps it consistent). **Decision unchanged: go-rod.** Watch item: reports say "automation-protocol-fingerprinting" is the cliff where CDP-driven Playwright forks fail regardless of patch quality — go-rod is also CDP-driven, so if Imperva escalates to CDP-protocol detection, go-rod could break where flag-stripped nodriver passes; the spike shows go-rod clears Hover *today*, but record this as the most likely future-break vector. Next re-check on break or ~quarterly.
 
 ## ADR
 
