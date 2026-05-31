@@ -121,6 +121,7 @@ Rollback: revert commit; no runtime behavior changed unless the opt-in live test
 
 **Files:**
 - Create: `pkg/hoverclient/backend.go`
+- Create: `pkg/hoverclient/browser_backend.go`
 - Create: `pkg/hoverclient/options.go`
 - Modify: `pkg/hoverclient/client.go`
 - Modify: `pkg/hoverclient/client_test.go`
@@ -168,7 +169,7 @@ type executionBackend interface {
 }
 ```
 
-Move current HTTP logic behind `httpBackend`. `Client` keeps `NewClient(creds, httpClient)` for compatibility; `httpClient != nil` selects `httpBackend`. Production `httpClient == nil` selects `browserBackend` in Task 3.
+Move current HTTP logic behind `httpBackend`. Add a compile-valid `browserBackend` skeleton in `browser_backend.go` that stores `BrowserOptions` and returns `ErrBrowserBackendUnavailable` for live operations until Task 3 replaces the login implementation. `Client` keeps `NewClient(creds, httpClient)` for compatibility; `httpClient != nil` selects `httpBackend`; production `httpClient == nil` selects `browserBackend`.
 
 **Step 4: Implement provider config**
 
@@ -189,7 +190,7 @@ Expected: PASS.
 **Step 6: Commit**
 
 ```bash
-git add pkg/hoverclient/backend.go pkg/hoverclient/options.go pkg/hoverclient/client.go pkg/hoverclient/client_test.go internal/provider.go internal/provider_test.go
+git add pkg/hoverclient/backend.go pkg/hoverclient/browser_backend.go pkg/hoverclient/options.go pkg/hoverclient/client.go pkg/hoverclient/client_test.go internal/provider.go internal/provider_test.go
 git commit -m "refactor(hoverclient): add browser backend configuration seam"
 ```
 
@@ -198,7 +199,7 @@ Rollback: revert commit; re-run `GOWORK=off go test ./pkg/hoverclient ./internal
 ### Task 3: Browser Backend Login, Stealth, and Typed Errors
 
 **Files:**
-- Create: `pkg/hoverclient/browser_backend.go`
+- Modify: `pkg/hoverclient/browser_backend.go`
 - Create: `pkg/hoverclient/browser_backend_test.go`
 - Modify: `pkg/hoverclient/client.go`
 - Modify: `pkg/hoverclient/backend.go`
