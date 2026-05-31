@@ -88,11 +88,14 @@ func launchProbeBrowser(ctx context.Context, opts BrowserOptions) (*rod.Browser,
 	if err := os.MkdirAll(opts.ProfileDir, 0o700); err != nil {
 		return nil, nil, fmt.Errorf("hover browser probe: create profile dir: %w", err)
 	}
+	// Local launcher: UserDataDir persists by default; Cleanup() would delete it
+	// (and KeepUserDataDir() panics on a non-managed launcher), so keep the
+	// profile dir and use Kill() in cleanup to tear down only the process. This
+	// preserves the Imperva clearance/cookie state across calls.
 	launcher := launcher.New().
 		Context(ctx).
 		HeadlessNew(opts.Headless).
-		UserDataDir(opts.ProfileDir).
-		KeepUserDataDir()
+		UserDataDir(opts.ProfileDir)
 
 	if opts.Path != "" {
 		launcher = launcher.Bin(opts.Path)
@@ -107,12 +110,12 @@ func launchProbeBrowser(ctx context.Context, opts BrowserOptions) (*rod.Browser,
 	}
 	browser := rod.New().Context(ctx).ControlURL(controlURL)
 	if err := browser.Connect(); err != nil {
-		launcher.Cleanup()
+		launcher.Kill()
 		return nil, nil, fmt.Errorf("hover browser probe: connect Chrome: %w", err)
 	}
 	cleanup := func() {
 		_ = browser.Close()
-		launcher.Cleanup()
+		launcher.Kill()
 	}
 	return browser, cleanup, nil
 }
