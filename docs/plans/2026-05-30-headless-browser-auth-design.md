@@ -111,3 +111,12 @@ Per user: re-check for maintained Imperva-bypass solutions periodically (next: ~
 ## ADR
 
 - **ADR 0001** — Drive Hover auth with a real browser (go-rod) to defeat Imperva ABP; reject HTTP-scrape (cannot pass), managed solvers (cred-leak), and Python tooling (wrong language).
+
+## Backport — driver spike (2026-05-30)
+
+De-risks Assumption #1 (go-rod can pass Imperva). Per the user's "spike both, pick the winner": a throwaway scratch module (`/tmp/hover-imperva-spike`) drove **both** playwright-go (manages its own Chromium) and **go-rod + go-rod/stealth** against live `hover.com/signin`.
+
+- **Result:** BOTH minted Imperva clearance cookies (`__uzm*`) headless — i.e. both clear Imperva's JS-sensor handshake that the cold Go `http.Client` cannot. The earlier 401 is confirmed an Imperva block, not creds/headers/token.
+- **Pick: go-rod.** Equal Imperva clearance, but pure-Go at runtime (no Python/Node bolted onto a Go gRPC plugin) — consistent with the design's "Primary Go" guidance. playwright-go would drag a Node-driven Playwright server + browser download into the plugin runtime.
+- **Scope of evidence:** confirms clearance-cookie minting + signin-form reachability. It does **not** yet prove a full *authenticated* login (the test account `gcadnstest` is pending email verification). The full authenticated login + `go_http_reuse_viable` signal remain gated by the plan's Task 1 live run once the account is verified.
+- **Manifest impact:** none. go-rod was already the locked driver; this only records empirical confirmation. No scope unlock required.
