@@ -30,7 +30,7 @@
 |------|-------|-------|--------|
 | 1 | Browser-backed Hover auth for Imperva-protected control panel | Task 1, Task 2, Task 3, Task 4, Task 5, Task 6 | feat/headless-browser-auth-2026-05-30T2030 |
 
-**Status:** Draft
+**Status:** Locked 2026-05-31T00:45:26Z
 
 ### Task 1: Live Browser Viability Gate
 
