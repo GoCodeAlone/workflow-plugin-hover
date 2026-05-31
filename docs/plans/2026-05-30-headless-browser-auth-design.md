@@ -15,7 +15,7 @@ Replace the cold-HTTP login with a **real-Chrome session driver** (CDP via **go-
 
 ### Architecture
 
-`hoverclient.Client.Login()` (+ the API methods) swap their HTTP impl for a go-rod browser session behind the **unchanged** `hoverclient` interface — so `internal/provider.go` + the `infra.dns` / `infra.dns_delegation` drivers are untouched.
+`hoverclient.Client.Login()` (+ the API methods) swap their live Hover execution path for a go-rod browser session behind the **unchanged** `hoverclient` interface — so `internal/provider.go` + the `infra.dns` / `infra.dns_delegation` drivers are untouched. Preserve testability by introducing an internal execution-backend seam: production uses the browser backend, unit tests can keep the local `httptest` HTTP backend without launching Chrome. This is not a public contract.
 
 ```
 Login(): launch/attach Chrome → goto /signin (Imperva sensor runs, clearance minted)
@@ -33,11 +33,11 @@ All Hover requests run inside Chrome, not just login. **Why:** TLS/JA3 is a docu
 
 ### Chrome acquisition (resolution order)
 
-1. **System/PATH Chrome** if present (`google-chrome`, `chromium`, `$ROD_BROWSER_PATH`).
+1. **System/PATH Chrome** if present (`google-chrome`, `chromium`, `$HOVER_BROWSER_PATH`; also honor `$ROD_BROWSER_PATH` for rod compatibility).
 2. Else **go-rod launcher auto-downloads + caches** a pinned Chromium (`~/.cache/rod`).
 3. **Container image** with Chrome baked, for CI (the gocodealone-dns import workflow runs in it).
 
-The browser cannot compile into the Go binary (~150MB); this is the "bundle what we can + external OK" middle path. A `HOVER_BROWSER_PATH` / `HOVER_BROWSER_DOWNLOAD=false` config lets operators pin behavior.
+The browser cannot compile into the Go binary (~150MB); this is the "bundle what we can + external OK" middle path. Provider config/env must expose `browser_path`, `browser_download`, `browser_headless`, and `browser_profile_dir` (env aliases: `HOVER_BROWSER_PATH`, `HOVER_BROWSER_DOWNLOAD`, `HOVER_BROWSER_HEADLESS`, `HOVER_BROWSER_PROFILE_DIR`) so operators can pin behavior and keep profile state out of the repo.
 
 ### Stealth (must not read as automated)
 
@@ -46,6 +46,7 @@ The browser cannot compile into the Go binary (~150MB); this is the "bundle what
 - Human-like input: per-key delays, a mouse move/click into fields before typing, small randomized waits.
 - Persistent profile / cookie jar so the Imperva clearance survives across calls within `sessionStaleAfter`.
 - go-rod/stealth has known gaps (webdriver leaks on new pages); apply manual page-init JS patches on top.
+- Browser profile directory is sensitive session state; default under `${XDG_STATE_HOME:-$HOME/.local/state}/wfctl/plugins/hover/browser-profile`, not the repository. Add/keep gitignore coverage for any local profile path used during tests.
 
 ### Error handling / failure modes
 
@@ -54,6 +55,7 @@ The browser cannot compile into the Go binary (~150MB); this is the "bundle what
 - **TOTP missing when 2FA required** → existing behavior (clear error).
 - **Browser launch/crash** → bounded retries (1 relaunch), then fail with the launch error.
 - **Slow Imperva sensor** → explicit waits for clearance cookie presence before submitting, with timeout.
+- **Verified test account unavailable** → stop after the live viability task and mark the plan blocked; do not build an unproven browser driver against only stubs.
 
 ## Global Design Guidance
 
@@ -66,7 +68,7 @@ Source: `docs/design-guidance.md` (rev 4)
 | Plugin contracts unchanged | `hoverclient` interface + gRPC surface unchanged; swap is internal |
 | Secrets never logged | creds typed into a local browser; never logged; `(creds redacted)` preserved; profile dir is local + gitignored |
 | Goreleaser + release workflow | new minor release (v0.5.0 — behavioral change); plugin.json minEngineVersion unchanged |
-| Cross-driver parity / e2e via real consumer | validate via the gocodealone-dns import workflow (real Hover) + the test account |
+| Cross-driver parity / e2e via real consumer | validate via the gocodealone-dns import workflow or equivalent local wfctl run using the real Hover provider + the test account |
 
 ## Security Review
 
@@ -86,6 +88,7 @@ Source: `docs/design-guidance.md` (rev 4)
 - **Plugin + real Hover**: the gocodealone-dns `import-dns.yml` run against live Hover (Imperva) is the end-to-end proof — `imported N infra.dns zones via provider "hover"` instead of the 401.
 - **Test account**: `hover-dns-test@gocodealone.com` (recorded in gocodealone-dns/.hover-test-account.local.md) for repeatable login validation without risking the production Hover account's lockout.
 - Not mock-only: go-rod tests can stub a local server for unit logic, but the Imperva-pass is validated against real Hover.
+- **Docs drift check**: README currently describes the old CSRF form login. The implementation plan must update it to the browser-driven auth path, Chrome/runtime config, bot-challenge behavior, and sensitive profile handling.
 
 ## Assumptions
 
