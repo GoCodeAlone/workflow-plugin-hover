@@ -231,42 +231,116 @@ func submitBrowserSignin(ctx context.Context, page *rod.Page, creds Credentials)
 }
 
 func browserSigninFetch(ctx context.Context, page *rod.Page, endpoint string, payload map[string]any) (browserSigninResult, error) {
-	obj, err := page.Context(ctx).Evaluate(&rod.EvalOptions{
-		ByValue:      true,
-		AwaitPromise: true,
-		JS: `async (endpoint, payload) => {
-			const response = await fetch(endpoint, {
-				method: 'POST',
-				credentials: 'include',
-				headers: {
-					'Accept': 'application/json, text/plain, */*',
-					'Content-Type': 'application/json;charset=UTF-8',
-					'X-Requested-With': 'XMLHttpRequest'
-				},
-				body: JSON.stringify(payload)
-			});
-			const raw = await response.text();
-			let parsed = {};
-			try { parsed = raw ? JSON.parse(raw) : {}; } catch (e) {}
-			return {
-				ok: response.ok,
-				httpCode: response.status,
-				succeeded: !!parsed.succeeded,
-				status: parsed.status || '',
-				error: parsed.error || '',
-				raw
-			};
-		}`,
-		JSArgs: []any{endpoint, payload},
-	})
+	raw, code, err := browserFetchJSON(ctx, page, "POST", endpoint, "application/json;charset=UTF-8", payload)
 	if err != nil {
 		return browserSigninResult{}, fmt.Errorf("hover browser signin: fetch %s: %w", endpoint, err)
 	}
-	var result browserSigninResult
-	if err := obj.Value.Unmarshal(&result); err != nil {
-		return browserSigninResult{}, fmt.Errorf("hover browser signin: decode %s result: %w", endpoint, err)
+	var parsed struct {
+		Succeeded bool   `json:"succeeded"`
+		Status    string `json:"status"`
+		Error     string `json:"error"`
 	}
-	return result, nil
+	_ = json.Unmarshal([]byte(raw), &parsed)
+	ok := code >= 200 && code < 300
+	return browserSigninResult{
+		OK:        ok,
+		HTTPCode:  code,
+		Succeeded: parsed.Succeeded,
+		Status:    parsed.Status,
+		Error:     parsed.Error,
+		Raw:       raw,
+	}, nil
+}
+
+// browserFetchResult is the raw result of a browserFetchJSON call.
+type browserFetchResult struct {
+	OK      bool   `json:"ok"`
+	Code    int    `json:"code"`
+	RawBody string `json:"rawBody"`
+}
+
+// browserFetchJSON executes an in-page fetch inside page with the given method,
+// endpoint (path or full URL), contentType, and payload. The payload is
+// serialized to either JSON (when contentType contains "application/json") or
+// application/x-www-form-urlencoded (when it contains "form-urlencoded") using
+// the values passed as a map[string]any. The function returns the response body
+// as a string, the HTTP status code, and any JavaScript-level error.
+//
+// credentials:'include' is always set so Chrome's session cookies accompany the
+// request — this is the key property that makes the hybrid write path work.
+//
+// extraHeaders is a map of additional headers to set (e.g. X-CSRF-Token).
+// Pass nil when no extra headers are needed.
+func browserFetchJSON(ctx context.Context, page *rod.Page, method, endpoint, contentType string, payload any) (rawBody string, code int, err error) {
+	return browserFetchWithHeaders(ctx, page, method, endpoint, contentType, payload, nil)
+}
+
+// browserFetchWithHeaders is like browserFetchJSON but also accepts an
+// extraHeaders map (may be nil). Each entry is set as a request header.
+func browserFetchWithHeaders(ctx context.Context, page *rod.Page, method, endpoint, contentType string, payload any, extraHeaders map[string]string) (rawBody string, code int, err error) {
+	// Serialize the payload to the wire body on the Go side so we don't have to
+	// pass a complex encoding function to JS.
+	var bodyStr string
+	if payload != nil {
+		switch {
+		case strings.Contains(contentType, "application/x-www-form-urlencoded"):
+			// Encode map[string]any as URL-encoded form string.
+			m, ok := payload.(map[string]any)
+			if !ok {
+				return "", 0, fmt.Errorf("browserFetchWithHeaders: form-urlencoded payload must be map[string]any")
+			}
+			vals := url.Values{}
+			for k, v := range m {
+				vals.Set(k, fmt.Sprintf("%v", v))
+			}
+			bodyStr = vals.Encode()
+		default:
+			// JSON-encode the payload.
+			b, jerr := json.Marshal(payload)
+			if jerr != nil {
+				return "", 0, fmt.Errorf("browserFetchWithHeaders: marshal payload: %w", jerr)
+			}
+			bodyStr = string(b)
+		}
+	}
+
+	// Encode extraHeaders as a JSON object string so JS can parse it.
+	extraJSON := "{}"
+	if len(extraHeaders) > 0 {
+		b, jerr := json.Marshal(extraHeaders)
+		if jerr != nil {
+			return "", 0, fmt.Errorf("browserFetchWithHeaders: marshal extraHeaders: %w", jerr)
+		}
+		extraJSON = string(b)
+	}
+
+	obj, evalErr := page.Context(ctx).Evaluate(&rod.EvalOptions{
+		ByValue:      true,
+		AwaitPromise: true,
+		JS: `async (method, endpoint, contentType, body, extraHeadersJSON) => {
+			const headers = {
+				'Accept': 'application/json, text/plain, */*',
+				'X-Requested-With': 'XMLHttpRequest'
+			};
+			if (contentType) headers['Content-Type'] = contentType;
+			const extra = JSON.parse(extraHeadersJSON);
+			Object.assign(headers, extra);
+			const opts = { method, credentials: 'include', headers };
+			if (body) opts.body = body;
+			const resp = await fetch(endpoint, opts);
+			const rawBody = await resp.text();
+			return { ok: resp.ok, code: resp.status, rawBody };
+		}`,
+		JSArgs: []any{method, endpoint, contentType, bodyStr, extraJSON},
+	})
+	if evalErr != nil {
+		return "", 0, evalErr
+	}
+	var result browserFetchResult
+	if err := obj.Value.Unmarshal(&result); err != nil {
+		return "", 0, fmt.Errorf("browserFetchWithHeaders: decode result: %w", err)
+	}
+	return result.RawBody, result.Code, nil
 }
 
 func probeGoHTTPReuse(ctx context.Context, browser *rod.Browser) (int, bool) {

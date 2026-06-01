@@ -2,6 +2,7 @@ package hoverclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -281,23 +282,203 @@ func (b *browserBackend) GetDomainDelegation(ctx context.Context, c *Client, dom
 }
 
 // ---------------------------------------------------------------------------
-// WRITE operations — Task 4 (not yet implemented, return sentinel).
+// WRITE operations — Task 4: in-browser DNS writes (hybrid write path).
+//
+// All four methods run the HTTP request in-page inside an authenticated Chrome
+// page (credentials:'include'). This ensures the request carries Chrome's TLS
+// fingerprint and the live Imperva clearance cookies — necessary for Hover's
+// bot-protection layer to accept mutations.
+//
+// Pattern per method:
+//  1. Ensure logged in (b.Login re-uses the fresh session when < sessionStaleAfter).
+//  2. Open a fresh page on the live browser (pages are cheap; closing them is safe).
+//  3. Navigate to a Hover page so the origin matches (required for same-origin
+//     credentials:'include' fetch to be accepted by the browser security model).
+//  4. Execute the HTTP request via browserFetchWithHeaders / browserFetchJSON.
+//  5. Parse the response on the Go side and return typed errors.
 // ---------------------------------------------------------------------------
 
-func (b *browserBackend) CreateRecord(_ context.Context, _ *Client, _ string, _ DNSRecord) (*DNSRecord, error) {
-	return nil, ErrBrowserBackendUnavailable
+// openWritePage opens a new browser page on the live browser, navigates it to
+// base+"/api/dns" to establish the same-origin context required for
+// credentials:'include' fetch calls. The caller is responsible for closing the
+// page via the returned cleanup func.
+//
+// b.browser.Context(ctx) returns a temporary clone of the browser that uses ctx
+// rather than the browser's internal (potentially-expired login-timeout) context,
+// so new page creation honours the caller's deadline rather than the login one.
+func (b *browserBackend) openWritePage(ctx context.Context, base string) (*rod.Page, func(), error) {
+	if b.browser == nil {
+		return nil, nil, fmt.Errorf("hover browser write: browser not initialised (Login must succeed before write operations)")
+	}
+	page, err := b.browser.Context(ctx).Page(proto.TargetCreateTarget{URL: "about:blank"})
+	if err != nil {
+		return nil, nil, fmt.Errorf("hover browser write: new page: %w", err)
+	}
+	page = page.Context(ctx)
+	// Navigate to any Hover page so `fetch` calls in-page are treated as
+	// same-origin requests (credentials:'include' requires matching origins).
+	// We use /api/dns because it's a stable, lightweight JSON endpoint.
+	if err := page.Navigate(base + "/api/dns"); err != nil {
+		_ = page.Close()
+		return nil, nil, fmt.Errorf("hover browser write: navigate: %w", err)
+	}
+	_ = page.WaitLoad()
+	cleanup := func() { _ = page.Close() }
+	return page, cleanup, nil
 }
 
-func (b *browserBackend) UpdateRecord(_ context.Context, _ *Client, _ string, _ DNSRecord) error {
-	return ErrBrowserBackendUnavailable
+// CreateRecord adds a new DNS record for the domain. Executes POST /api/dns
+// in-page with application/x-www-form-urlencoded payload, matching the HTTP
+// backend exactly but running inside Chrome's TLS session.
+func (b *browserBackend) CreateRecord(ctx context.Context, c *Client, domainID string, rec DNSRecord) (*DNSRecord, error) {
+	if err := b.ensureLoggedIn(ctx, c); err != nil {
+		return nil, err
+	}
+	base := b.signinHost()
+	page, cleanup, err := b.openWritePage(ctx, base)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+
+	form := map[string]any{
+		"domain_id": domainID,
+		"name":      rec.Name,
+		"type":      rec.Type,
+		"content":   rec.Content,
+	}
+	if rec.TTL > 0 {
+		form["ttl"] = fmt.Sprintf("%d", rec.TTL)
+	}
+
+	rawBody, code, err := browserFetchJSON(ctx, page, "POST", base+"/api/dns",
+		"application/x-www-form-urlencoded", form)
+	if err != nil {
+		return nil, fmt.Errorf("hover browser CreateRecord: fetch: %w", err)
+	}
+	if code >= 400 {
+		return nil, fmt.Errorf("hover browser CreateRecord: HTTP %d: %s", code, strings.TrimSpace(rawBody))
+	}
+	var out struct {
+		DNSRecord DNSRecord `json:"dns_record"`
+	}
+	if err := json.Unmarshal([]byte(rawBody), &out); err != nil {
+		return nil, fmt.Errorf("hover browser CreateRecord: parse response: %w", err)
+	}
+	return &out.DNSRecord, nil
 }
 
-func (b *browserBackend) DeleteRecord(_ context.Context, _ *Client, _ string) error {
-	return ErrBrowserBackendUnavailable
+// UpdateRecord updates an existing DNS record. Executes PUT /api/dns/<recordID>
+// in-page with application/x-www-form-urlencoded payload.
+func (b *browserBackend) UpdateRecord(ctx context.Context, c *Client, recordID string, rec DNSRecord) error {
+	if err := b.ensureLoggedIn(ctx, c); err != nil {
+		return err
+	}
+	base := b.signinHost()
+	page, cleanup, err := b.openWritePage(ctx, base)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	form := map[string]any{"content": rec.Content}
+	if rec.TTL > 0 {
+		form["ttl"] = fmt.Sprintf("%d", rec.TTL)
+	}
+	endpoint := fmt.Sprintf("%s/api/dns/%s", base, url.PathEscape(recordID))
+	rawBody, code, err := browserFetchJSON(ctx, page, "PUT", endpoint,
+		"application/x-www-form-urlencoded", form)
+	if err != nil {
+		return fmt.Errorf("hover browser UpdateRecord %q: fetch: %w", recordID, err)
+	}
+	if code >= 400 {
+		return fmt.Errorf("hover browser UpdateRecord %q: HTTP %d: %s", recordID, code, strings.TrimSpace(rawBody))
+	}
+	return nil
 }
 
-func (b *browserBackend) SetNameservers(_ context.Context, _ *Client, _ string, _ []string) error {
-	return ErrBrowserBackendUnavailable
+// DeleteRecord removes a DNS record by ID. Executes DELETE /api/dns/<recordID>
+// in-page (no body).
+func (b *browserBackend) DeleteRecord(ctx context.Context, c *Client, recordID string) error {
+	if err := b.ensureLoggedIn(ctx, c); err != nil {
+		return err
+	}
+	base := b.signinHost()
+	page, cleanup, err := b.openWritePage(ctx, base)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	endpoint := fmt.Sprintf("%s/api/dns/%s", base, url.PathEscape(recordID))
+	rawBody, code, err := browserFetchJSON(ctx, page, "DELETE", endpoint, "", nil)
+	if err != nil {
+		return fmt.Errorf("hover browser DeleteRecord %q: fetch: %w", recordID, err)
+	}
+	if code >= 400 {
+		return fmt.Errorf("hover browser DeleteRecord %q: HTTP %d: %s", recordID, code, strings.TrimSpace(rawBody))
+	}
+	return nil
+}
+
+// SetNameservers updates the registrar-level nameservers for a domain.
+// Rejects empty ns immediately (same invariant as the HTTP backend).
+// CSRF token is extracted in-browser from the control_panel domain page, then
+// a PUT is issued in-page with the CSRF token in X-CSRF-Token.
+func (b *browserBackend) SetNameservers(ctx context.Context, c *Client, domainName string, ns []string) error {
+	if len(ns) == 0 {
+		return fmt.Errorf("hover: SetNameservers %q: %w", domainName, ErrEmptyNameservers)
+	}
+	if err := b.ensureLoggedIn(ctx, c); err != nil {
+		return err
+	}
+	if b.browser == nil {
+		return fmt.Errorf("hover browser SetNameservers: browser not initialised (Login must succeed before write operations)")
+	}
+	base := b.signinHost()
+
+	// Open a page and navigate to the control_panel domain page to read the CSRF.
+	// Use browser.Context(ctx) to override the browser's stored (login-timeout)
+	// context so new page creation honours the caller's deadline.
+	page, err := b.browser.Context(ctx).Page(proto.TargetCreateTarget{URL: "about:blank"})
+	if err != nil {
+		return fmt.Errorf("hover browser SetNameservers: new page: %w", err)
+	}
+	page = page.Context(ctx)
+	defer func() { _ = page.Close() }()
+
+	cpURL := fmt.Sprintf("%s/control_panel/domain/%s", base, url.PathEscape(domainName))
+	if err := page.Navigate(cpURL); err != nil {
+		return fmt.Errorf("hover browser SetNameservers: navigate control_panel: %w", err)
+	}
+	_ = page.WaitLoad()
+
+	// Extract the CSRF meta tag via JavaScript DOM access.
+	obj, err := page.Context(ctx).Eval(`() => {
+		const m = document.querySelector('meta[name="csrf-token"]');
+		return m ? m.getAttribute('content') : '';
+	}`)
+	if err != nil {
+		return fmt.Errorf("hover browser SetNameservers: eval CSRF: %w", err)
+	}
+	csrf := obj.Value.String()
+	if csrf == "" {
+		return fmt.Errorf("hover browser SetNameservers: CSRF meta tag not found at %s", cpURL)
+	}
+
+	// Build PUT endpoint + payload (same as HTTP backend).
+	putEndpoint := fmt.Sprintf("%s/api/control_panel/domains/domain-%s", base, url.PathEscape(domainName))
+	payload := map[string]any{"field": "nameservers", "value": ns}
+
+	rawBody, code, err := browserFetchWithHeaders(ctx, page, "PUT", putEndpoint,
+		"application/json", payload, map[string]string{"X-CSRF-Token": csrf})
+	if err != nil {
+		return fmt.Errorf("hover browser SetNameservers %q: fetch: %w", domainName, err)
+	}
+	if code >= 400 {
+		return fmt.Errorf("hover browser SetNameservers %q: HTTP %d: %s", domainName, code, strings.TrimSpace(rawBody))
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

@@ -393,9 +393,12 @@ func TestBrowserBackend_ReadsDelegateToHTTP(t *testing.T) {
 // TestBrowserBackend_WritesReturnUnavailable
 // --------------------------------------------------------------------------
 
-// TestBrowserBackend_WritesReturnUnavailable verifies that write operations
-// still return ErrBrowserBackendUnavailable (Task 4 territory).
-func TestBrowserBackend_WritesReturnUnavailable(t *testing.T) {
+// TestBrowserBackend_WritesRequireBrowserSession verifies that write operations
+// on a browserBackend whose browser has not been initialised (no successful
+// Login that launched Chrome) return a clear "not initialised" error rather
+// than panicking or returning a misleading result. This covers the case where
+// callers fake loggedAt but never actually ran Login (unit-test-only pattern).
+func TestBrowserBackend_WritesRequireBrowserSession(t *testing.T) {
 	opts := BrowserOptions{
 		Download:   false,
 		Headless:   true,
@@ -412,21 +415,32 @@ func TestBrowserBackend_WritesReturnUnavailable(t *testing.T) {
 	c.mu.Lock()
 	c.loggedAt = time.Now()
 	c.mu.Unlock()
-	_ = bb // ensure the backend is the right type
 
 	ctx := context.Background()
-	if err := bb.SetNameservers(ctx, c, "example.com", []string{"ns1.com"}); !errors.Is(err, ErrBrowserBackendUnavailable) {
-		t.Errorf("SetNameservers: want ErrBrowserBackendUnavailable, got %v", err)
+	// Each write operation must return a non-nil error mentioning "not initialised"
+	// (not a panic, not a nil error, not ErrBrowserBackendUnavailable).
+	checkWriteErr := func(t *testing.T, label string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Errorf("%s: want error for uninitialised browser, got nil", label)
+			return
+		}
+		if !strings.Contains(err.Error(), "not initialised") {
+			t.Errorf("%s: error = %q; want message containing 'not initialised'", label, err.Error())
+		}
 	}
-	if _, err := bb.CreateRecord(ctx, c, "dom1", DNSRecord{}); !errors.Is(err, ErrBrowserBackendUnavailable) {
-		t.Errorf("CreateRecord: want ErrBrowserBackendUnavailable, got %v", err)
-	}
-	if err := bb.UpdateRecord(ctx, c, "r1", DNSRecord{}); !errors.Is(err, ErrBrowserBackendUnavailable) {
-		t.Errorf("UpdateRecord: want ErrBrowserBackendUnavailable, got %v", err)
-	}
-	if err := bb.DeleteRecord(ctx, c, "r1"); !errors.Is(err, ErrBrowserBackendUnavailable) {
-		t.Errorf("DeleteRecord: want ErrBrowserBackendUnavailable, got %v", err)
-	}
+
+	err = bb.SetNameservers(ctx, c, "example.com", []string{"ns1.com"})
+	checkWriteErr(t, "SetNameservers", err)
+
+	_, err = bb.CreateRecord(ctx, c, "dom1", DNSRecord{})
+	checkWriteErr(t, "CreateRecord", err)
+
+	err = bb.UpdateRecord(ctx, c, "r1", DNSRecord{})
+	checkWriteErr(t, "UpdateRecord", err)
+
+	err = bb.DeleteRecord(ctx, c, "r1")
+	checkWriteErr(t, "DeleteRecord", err)
 }
 
 // --------------------------------------------------------------------------
