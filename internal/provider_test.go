@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
 	"sync/atomic"
 	"testing"
 
@@ -197,5 +198,74 @@ func TestHoverProvider_EnumerateAll_DNS_skipsBlankName(t *testing.T) {
 	}
 	if len(out) != 1 || out[0].ProviderID != "real.test" {
 		t.Fatalf("want 1 entry with ProviderID=real.test; got %+v", out)
+	}
+}
+
+// ── browser config tests ──────────────────────────────────────────────────────
+
+// TestInitialize_ParsesBrowserConfig verifies that browser_path, browser_download,
+// browser_headless, and browser_profile_dir config keys are parsed and passed
+// to the client.
+func TestInitialize_ParsesBrowserConfig(t *testing.T) {
+	p := NewHoverProvider()
+	if err := p.Initialize(context.Background(), map[string]any{
+		"username":            "user@example.com",
+		"password":            "password",
+		"browser_path":        "/usr/bin/chromium",
+		"browser_download":    false,
+		"browser_headless":    false,
+		"browser_profile_dir": "/tmp/test-profile",
+	}); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	opts := p.browserOpts
+	if opts.Path != "/usr/bin/chromium" {
+		t.Errorf("Path = %q, want /usr/bin/chromium", opts.Path)
+	}
+	if opts.Download != false {
+		t.Errorf("Download = %v, want false", opts.Download)
+	}
+	if opts.Headless != false {
+		t.Errorf("Headless = %v, want false", opts.Headless)
+	}
+	if opts.ProfileDir != "/tmp/test-profile" {
+		t.Errorf("ProfileDir = %q, want /tmp/test-profile", opts.ProfileDir)
+	}
+}
+
+// TestInitialize_EnvBrowserConfigAliases verifies that HOVER_BROWSER_* env
+// vars are read as fallbacks when the config map omits browser_* keys.
+func TestInitialize_EnvBrowserConfigAliases(t *testing.T) {
+	t.Setenv("HOVER_BROWSER_PATH", "/env/chrome")
+	t.Setenv("HOVER_BROWSER_HEADLESS", "false")
+	t.Setenv("HOVER_BROWSER_DOWNLOAD", "false")
+	t.Setenv("HOVER_BROWSER_PROFILE_DIR", "/env/profile")
+	defer func() {
+		os.Unsetenv("HOVER_BROWSER_PATH")
+		os.Unsetenv("HOVER_BROWSER_HEADLESS")
+		os.Unsetenv("HOVER_BROWSER_DOWNLOAD")
+		os.Unsetenv("HOVER_BROWSER_PROFILE_DIR")
+	}()
+
+	p := NewHoverProvider()
+	if err := p.Initialize(context.Background(), map[string]any{
+		"username": "user@example.com",
+		"password": "password",
+		// no browser_* config keys — env vars should be used
+	}); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	opts := p.browserOpts
+	if opts.Path != "/env/chrome" {
+		t.Errorf("Path = %q, want /env/chrome", opts.Path)
+	}
+	if opts.Headless != false {
+		t.Errorf("Headless = %v, want false", opts.Headless)
+	}
+	if opts.Download != false {
+		t.Errorf("Download = %v, want false", opts.Download)
+	}
+	if opts.ProfileDir != "/env/profile" {
+		t.Errorf("ProfileDir = %q, want /env/profile", opts.ProfileDir)
 	}
 }

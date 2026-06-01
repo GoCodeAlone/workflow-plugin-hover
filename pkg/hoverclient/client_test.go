@@ -697,3 +697,70 @@ func TestExtractCSRFMeta_AttributeOrders(t *testing.T) {
 		}
 	}
 }
+
+// ── backend-seam tests ────────────────────────────────────────────────────────
+
+// TestNewClient_InjectedHTTPUsesHTTPBackendForTests verifies that passing a
+// non-nil *http.Client selects the HTTP backend so existing httptest stubs
+// work without Chrome.
+func TestNewClient_InjectedHTTPUsesHTTPBackendForTests(t *testing.T) {
+	jar, _ := cookiejar.New(nil)
+	httpC := &http.Client{Jar: jar}
+	creds := Credentials{Username: "alice", Password: "pw"}
+	c, err := NewClient(creds, httpC)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	_, ok := c.backend.(*httpBackend)
+	if !ok {
+		t.Fatalf("want *httpBackend when httpClient is injected; got %T", c.backend)
+	}
+}
+
+// TestNewClient_DefaultsToBrowserBackendWithoutInjectedHTTP verifies that
+// passing nil selects the browser backend (for production use with Chrome).
+func TestNewClient_DefaultsToBrowserBackendWithoutInjectedHTTP(t *testing.T) {
+	creds := Credentials{Username: "alice", Password: "pw"}
+	c, err := NewClient(creds, nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	_, ok := c.backend.(*browserBackend)
+	if !ok {
+		t.Fatalf("want *browserBackend when httpClient is nil; got %T", c.backend)
+	}
+}
+
+// TestNewClientWithOptions_PreservesExplicitBrowserConfig verifies that
+// explicit ClientOptions.Browser values survive NewClientWithOptions.
+func TestNewClientWithOptions_PreservesExplicitBrowserConfig(t *testing.T) {
+	creds := Credentials{Username: "alice", Password: "pw"}
+	opts := ClientOptions{
+		Browser: BrowserOptions{
+			Path:       "/custom/chrome",
+			Download:   false,
+			Headless:   false,
+			ProfileDir: "/custom/profile",
+		},
+	}
+	c, err := NewClientWithOptions(creds, nil, opts)
+	if err != nil {
+		t.Fatalf("NewClientWithOptions: %v", err)
+	}
+	bb, ok := c.backend.(*browserBackend)
+	if !ok {
+		t.Fatalf("want *browserBackend; got %T", c.backend)
+	}
+	if bb.opts.Path != "/custom/chrome" {
+		t.Errorf("Path = %q, want /custom/chrome", bb.opts.Path)
+	}
+	if bb.opts.Download != false {
+		t.Errorf("Download = %v, want false", bb.opts.Download)
+	}
+	if bb.opts.Headless != false {
+		t.Errorf("Headless = %v, want false", bb.opts.Headless)
+	}
+	if bb.opts.ProfileDir != "/custom/profile" {
+		t.Errorf("ProfileDir = %q, want /custom/profile", bb.opts.ProfileDir)
+	}
+}
