@@ -159,12 +159,14 @@ func (b *browserBackend) Login(ctx context.Context, c *Client) error {
 		return fmt.Errorf("hover browser login: wait signin load: %w", err)
 	}
 
-	// Wait for Imperva clearance cookies. If they never arrive → bot challenge.
+	// Wait for Imperva clearance cookies. A timeout/cancel means clearance was
+	// never minted → treat as a bot challenge. A genuine cookie-read failure is
+	// a browser malfunction, not a challenge — surface it as-is.
 	if _, err := waitForClearanceCookies(ctx, browser); err != nil {
 		if isContextErr(err) {
-			return fmt.Errorf("%w: %v", ErrBotChallenge, err)
+			return fmt.Errorf("%w: clearance cookies not minted: %v", ErrBotChallenge, err)
 		}
-		return fmt.Errorf("%w: %v", ErrBotChallenge, err)
+		return fmt.Errorf("hover browser login: read clearance cookies: %w", err)
 	}
 
 	// Submit credentials via in-page fetch. The probe helper handles need_2fa
