@@ -3,8 +3,8 @@ module github.com/GoCodeAlone/workflow-plugin-hover
 go 1.26.3
 
 require (
+	github.com/GoCodeAlone/rod v0.116.3
 	github.com/GoCodeAlone/workflow v0.64.0
-	github.com/go-rod/rod v0.116.2
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af
 )
 
