@@ -37,31 +37,64 @@ type Client struct {
 	creds     Credentials
 	loggedAt  time.Time
 	UserAgent string
+	backend   executionBackend
 }
 
-// NewClient returns a fresh Client. Pass http=nil for an internal
-// jar-backed http.Client. Tests inject a stub to redirect requests.
+// NewClient returns a fresh Client. Pass httpClient=nil for the browser
+// backend (production path — Chrome drives Imperva clearance + login).
+// Pass a non-nil *http.Client to select the HTTP backend; tests inject
+// a stub to redirect requests without launching Chrome.
 func NewClient(creds Credentials, httpClient *http.Client) (*Client, error) {
+	return NewClientWithOptions(creds, httpClient, ClientOptions{})
+}
+
+// NewClientWithOptions returns a Client with explicit runtime options.
+// opts.Browser is used when httpClient is nil (browser backend); it is
+// ignored when httpClient is non-nil (HTTP backend selected).
+func NewClientWithOptions(creds Credentials, httpClient *http.Client, opts ClientOptions) (*Client, error) {
 	creds.Username = strings.TrimSpace(creds.Username)
 	creds.Password = strings.TrimRight(creds.Password, "\r\n")
 	if creds.Username == "" || creds.Password == "" {
 		return nil, errors.New("hover: username + password required")
 	}
-	if httpClient == nil {
+
+	var backend executionBackend
+	if httpClient != nil {
+		// Injected HTTP client: use HTTP backend (test path).
+		if httpClient.Jar == nil {
+			jar, err := cookiejar.New(nil)
+			if err != nil {
+				return nil, err
+			}
+			httpClient.Jar = jar
+		}
+		backend = &httpBackend{}
+	} else {
+		// nil HTTP client: use browser backend (production path).
+		browserOpts := opts.Browser
+		if browserOpts.ProfileDir == "" {
+			browserOpts.ProfileDir = defaultBrowserProfileDir()
+		}
+		if browserOpts.Timeout == 0 {
+			browserOpts.Timeout = defaultBrowserTimeout
+		}
+		backend = newBrowserBackend(browserOpts)
+
+		// Provide a jar-backed http.Client for the cookie-reuse path
+		// (Task 3 will populate this jar from browser cookies).
 		jar, err := cookiejar.New(nil)
 		if err != nil {
 			return nil, fmt.Errorf("hover: cookie jar: %w", err)
 		}
 		httpClient = &http.Client{Jar: jar, Timeout: 30 * time.Second}
 	}
-	if httpClient.Jar == nil {
-		jar, err := cookiejar.New(nil)
-		if err != nil {
-			return nil, err
-		}
-		httpClient.Jar = jar
-	}
-	return &Client{http: httpClient, creds: creds, UserAgent: defaultUserAgent}, nil
+
+	return &Client{
+		http:      httpClient,
+		creds:     creds,
+		UserAgent: defaultUserAgent,
+		backend:   backend,
+	}, nil
 }
 
 // Login performs a full authentication cycle against Hover's control panel.
@@ -69,13 +102,14 @@ func NewClient(creds Credentials, httpClient *http.Client) (*Client, error) {
 // when the session is older than sessionStaleAfter (1 hour). Safe for
 // concurrent use; the internal mutex serialises calls.
 //
-// The underlying auth flow follows Hover's current React signin UI:
+// On the HTTP backend the underlying auth flow follows Hover's current React
+// signin UI:
 //  1. POST https://www.hover.com/signin/auth.json with username + password.
 //  2. If the response status is "need_2fa", POST /signin/auth2.json with the
 //     current TOTP code.
 //  3. Session cookies are stored in the jar for subsequent API calls.
 func (c *Client) Login(ctx context.Context) error {
-	return c.ensureLogin(ctx)
+	return c.backend.Login(ctx, c)
 }
 
 // ensureLogin re-authenticates iff the session is stale. Safe to call
@@ -288,6 +322,11 @@ type Domain struct {
 // re-apply thrash failure mode (empty → Diff says NeedsUpdate forever)
 // into a single-iteration error visible at first wfctl plan.
 func (c *Client) GetDomainDelegation(ctx context.Context, domainName string) (*DomainDelegation, error) {
+	return c.backend.GetDomainDelegation(ctx, c, domainName)
+}
+
+// getDomainDelegationHTTP is the HTTP-backend implementation of GetDomainDelegation.
+func (c *Client) getDomainDelegationHTTP(ctx context.Context, domainName string) (*DomainDelegation, error) {
 	if err := c.ensureLogin(ctx); err != nil {
 		return nil, err
 	}
@@ -335,6 +374,11 @@ func (c *Client) GetDomainDelegation(ctx context.Context, domainName string) (*D
 // resource). Future: cache CSRF at session granularity if
 // mixed-resource throughput becomes a concern.
 func (c *Client) SetNameservers(ctx context.Context, domainName string, ns []string) error {
+	return c.backend.SetNameservers(ctx, c, domainName, ns)
+}
+
+// setNameserversHTTP is the HTTP-backend implementation of SetNameservers.
+func (c *Client) setNameserversHTTP(ctx context.Context, domainName string, ns []string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.ensureLoginLocked(ctx); err != nil {
@@ -387,6 +431,11 @@ func (c *Client) putNameserversLocked(ctx context.Context, domainName string, ns
 // CSRF is not required for GET requests under Hover's API; ensureLogin
 // is still called so the session cookie is fresh.
 func (c *Client) ListDomains(ctx context.Context) ([]Domain, error) {
+	return c.backend.ListDomains(ctx, c)
+}
+
+// listDomainsHTTP is the HTTP-backend implementation of ListDomains.
+func (c *Client) listDomainsHTTP(ctx context.Context) ([]Domain, error) {
 	if err := c.ensureLogin(ctx); err != nil {
 		return nil, fmt.Errorf("hover: ListDomains: login: %w", err)
 	}
@@ -424,6 +473,11 @@ func (c *Client) ListDomains(ctx context.Context) ([]Domain, error) {
 // creating new records via CreateRecord; the human-readable name is
 // not accepted by the POST /api/dns endpoint.
 func (c *Client) GetDomain(ctx context.Context, domain string) (*Domain, error) {
+	return c.backend.GetDomain(ctx, c, domain)
+}
+
+// getDomainHTTP is the HTTP-backend implementation of GetDomain.
+func (c *Client) getDomainHTTP(ctx context.Context, domain string) (*Domain, error) {
 	if err := c.ensureLogin(ctx); err != nil {
 		return nil, err
 	}
@@ -456,6 +510,11 @@ func (c *Client) GetDomain(ctx context.Context, domain string) (*Domain, error) 
 // ListRecords returns records for the named zone. Caller MUST pass
 // the apex domain (e.g. "example.com").
 func (c *Client) ListRecords(ctx context.Context, domain string) ([]DNSRecord, error) {
+	return c.backend.ListRecords(ctx, c, domain)
+}
+
+// listRecordsHTTP is the HTTP-backend implementation of ListRecords.
+func (c *Client) listRecordsHTTP(ctx context.Context, domain string) ([]DNSRecord, error) {
 	if err := c.ensureLogin(ctx); err != nil {
 		return nil, err
 	}
@@ -487,6 +546,11 @@ func (c *Client) ListRecords(ctx context.Context, domain string) ([]DNSRecord, e
 
 // CreateRecord adds a new DNS record for the domain.
 func (c *Client) CreateRecord(ctx context.Context, domainID string, rec DNSRecord) (*DNSRecord, error) {
+	return c.backend.CreateRecord(ctx, c, domainID, rec)
+}
+
+// createRecordHTTP is the HTTP-backend implementation of CreateRecord.
+func (c *Client) createRecordHTTP(ctx context.Context, domainID string, rec DNSRecord) (*DNSRecord, error) {
 	if err := c.ensureLogin(ctx); err != nil {
 		return nil, err
 	}
@@ -523,6 +587,11 @@ func (c *Client) CreateRecord(ctx context.Context, domainID string, rec DNSRecor
 
 // UpdateRecord PATCHes an existing record's content (and TTL when > 0).
 func (c *Client) UpdateRecord(ctx context.Context, recordID string, rec DNSRecord) error {
+	return c.backend.UpdateRecord(ctx, c, recordID, rec)
+}
+
+// updateRecordHTTP is the HTTP-backend implementation of UpdateRecord.
+func (c *Client) updateRecordHTTP(ctx context.Context, recordID string, rec DNSRecord) error {
 	if err := c.ensureLogin(ctx); err != nil {
 		return err
 	}
@@ -548,6 +617,11 @@ func (c *Client) UpdateRecord(ctx context.Context, recordID string, rec DNSRecor
 
 // DeleteRecord removes a record by ID.
 func (c *Client) DeleteRecord(ctx context.Context, recordID string) error {
+	return c.backend.DeleteRecord(ctx, c, recordID)
+}
+
+// deleteRecordHTTP is the HTTP-backend implementation of DeleteRecord.
+func (c *Client) deleteRecordHTTP(ctx context.Context, recordID string) error {
 	if err := c.ensureLogin(ctx); err != nil {
 		return err
 	}

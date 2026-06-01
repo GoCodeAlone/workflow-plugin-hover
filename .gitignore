@@ -1,3 +1,5 @@
 .claude/
 .release/
 dist/
+
+.hover-browser-profile/

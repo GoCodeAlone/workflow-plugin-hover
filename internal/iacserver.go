@@ -26,6 +26,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"time"
 
@@ -194,9 +195,7 @@ func (s *hoverIaCServer) EnumerateAll(ctx context.Context, req *pb.EnumerateAllR
 			return nil, fmt.Errorf("hover iacserver: encode EnumerateAll outputs: %w", err)
 		}
 		sensitive := make(map[string]bool, len(o.Sensitive))
-		for k, v := range o.Sensitive {
-			sensitive[k] = v
-		}
+		maps.Copy(sensitive, o.Sensitive)
 		pbOuts = append(pbOuts, &pb.ResourceOutput{
 			Name:        o.Name,
 			Type:        o.Type,
@@ -695,9 +694,7 @@ func copyBoolMap(in map[string]bool) map[string]bool {
 		return nil
 	}
 	out := make(map[string]bool, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
+	maps.Copy(out, in)
 	return out
 }
 
@@ -757,8 +754,6 @@ func copyStringMap(m map[string]string) map[string]string {
 		return nil
 	}
 	out := make(map[string]string, len(m))
-	for k, v := range m {
-		out[k] = v
-	}
+	maps.Copy(out, m)
 	return out
 }
