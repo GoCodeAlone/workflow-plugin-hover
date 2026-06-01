@@ -137,3 +137,22 @@ Ran the Task-1 live gate (`ProbeLiveBrowserAuth`, go-rod headless) against verif
 Per user direction (go-rod stale since 2024; want dep/vuln control), the driver is now the **maintained fork `github.com/GoCodeAlone/rod`** instead of upstream `github.com/go-rod/rod`. See **ADR 0002**. Fork is renamed-module, Go 1.26.3, `govulncheck`-clean + Dependabot-clean (x/sys addressed), CodeQL-green; divergence kept minimal for upstream-mergeability. `hoverclient` will import `github.com/GoCodeAlone/rod` directly.
 
 **Scope amendment (user-approved):** adds (1) a one-line dependency-source change in `hoverclient` (import + `go.mod` require → `GoCodeAlone/rod@<tag>`); (2) the production live-login proof runs via a **GitHub Actions workflow on the self-hosted runner** (where `HOVER_*` secrets live) — NOT locally; the user will not provide prod creds locally. PR count for hover unchanged (still 1). No task added; the dep source + the CI-run venue are substitutions within the locked manifest's existing Task 2 (dep wiring) and Task 5 (real-consumer runtime validation). Recorded here + in ADR 0002; no further unlock needed.
+
+## Backport — PRODUCTION live proof (2026-06-01)
+
+Ran the probe in CI (gocodealone-dns `hover-live-auth-probe.yml`, self-hosted runner, headless) against the **production** Hover account via org `HOVER_*` secrets. Result:
+
+```
+go_http_reuse_viable=true domains=30 clearance_cookies=[__uzma __uzmb __uzme __uzmc __uzmd __ssds __ssuzjsr0]
+--- PASS (5.34s)
+```
+
+Validates, end-to-end against production:
+1. **`GoCodeAlone/rod` clears Imperva** headless (clearance cookies minted).
+2. **TOTP completes Hover's new-device 2FA** — a TOTP-configured account is challenged with TOTP (not email-OTP), so `HOVER_TOTP_SECRET` is sufficient for headless CI login. (Email-default accounts like the test account remain non-CI-viable — keep the typed email-2FA error.)
+3. **30 production domains** enumerated; no secret leakage.
+4. **Assumption #3 CONFIRMED: Imperva clears the SESSION, not per-request.** `go_http_reuse_viable=true` — a plain Go `http.Client` reusing the browser's clearance cookies successfully called `/api/domains`.
+
+**Decision — adopt login-only (per the design's own conditional).** Browser only for **login** (run the Imperva JS sensor + 2FA → mint clearance), then hand the clearance cookies to the existing Go `http.Client` for the API/DNS calls. Lighter than full-browser (one page load per session, not per call) and proven to work for reads. **Caveat (from the 2026-05-30 re-check):** Imperva's JA4/TLS signal means a Go `http.Client` exposes a non-Chrome TLS fingerprint; this passed for reads in this run, but if Imperva later challenges the HTTP path, fall back to in-browser `fetch` (the backend seam keeps both paths available). For write paths (NS delegation during migration), prefer in-browser to be safe. This refines the locked plan's Task 4 default; manifest unchanged (still one backend seam, both transports behind it), recorded here — no unlock needed.
+
+Minor follow-up: `setup-go@v5` emits a Node-20 deprecation warning (cutoff 2026-06-16) — bump the pinned action later.
