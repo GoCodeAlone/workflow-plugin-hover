@@ -326,26 +326,29 @@ func (p *HoverProvider) EnumerateAll(ctx context.Context, resourceType string) (
 	if p.domains == nil {
 		return nil, fmt.Errorf("hover: EnumerateAll called on provider that is not initialized — call Initialize first")
 	}
-	if resourceType != "infra.dns" {
+	if resourceType != "infra.dns" && resourceType != "infra.dns_delegation" {
 		return nil, fmt.Errorf("hover: EnumerateAll: resource type %q not supported", resourceType)
 	}
 	domains, err := p.domains.ListDomains(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("hover: EnumerateAll infra.dns: %w", err)
+		return nil, fmt.Errorf("hover: EnumerateAll %s: %w", resourceType, err)
 	}
 	out := make([]*interfaces.ResourceOutput, 0, len(domains))
 	for _, d := range domains {
 		if d.Name == "" {
 			continue
 		}
-		out = append(out, &interfaces.ResourceOutput{
+		o := &interfaces.ResourceOutput{
 			ProviderID: d.Name,
-			Type:       "infra.dns",
-			Outputs: map[string]any{
+			Type:       resourceType,
+		}
+		if resourceType == "infra.dns" {
+			o.Outputs = map[string]any{
 				"zone":      d.Name,
 				"domain_id": d.ID,
-			},
-		})
+			}
+		}
+		out = append(out, o)
 	}
 	return out, nil
 }

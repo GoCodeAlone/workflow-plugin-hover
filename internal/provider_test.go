@@ -201,6 +201,49 @@ func TestHoverProvider_EnumerateAll_DNS_skipsBlankName(t *testing.T) {
 	}
 }
 
+// ── EnumerateAll(infra.dns_delegation) coverage ─────────────────────────────
+
+// TestEnumerateAll_DelegationListsDomains verifies that EnumerateAll for
+// "infra.dns_delegation" returns one ResourceOutput per domain with
+// ProviderID == domain.Name and Type == "infra.dns_delegation", and that
+// an unknown resource type still returns the unsupported error.
+func TestEnumerateAll_DelegationListsDomains(t *testing.T) {
+	stub := &fakeHoverClient{
+		domains: []hoverclient.Domain{
+			{ID: "1", Name: "a.com"},
+			{ID: "2", Name: "b.com"},
+		},
+	}
+	p := &HoverProvider{domains: stub}
+
+	out, err := p.EnumerateAll(context.Background(), "infra.dns_delegation")
+	if err != nil {
+		t.Fatalf("EnumerateAll(infra.dns_delegation): %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("want 2 outputs; got %d", len(out))
+	}
+	for i, want := range []string{"a.com", "b.com"} {
+		if out[i].ProviderID != want {
+			t.Errorf("out[%d].ProviderID = %q; want %q", i, out[i].ProviderID, want)
+		}
+		if out[i].Type != "infra.dns_delegation" {
+			t.Errorf("out[%d].Type = %q; want infra.dns_delegation", i, out[i].Type)
+		}
+	}
+	if stub.calls != 1 {
+		t.Errorf("ListDomains called %d times; want 1", stub.calls)
+	}
+
+	// Unknown resource type must still return the unsupported error.
+	stub2 := &fakeHoverClient{}
+	p2 := &HoverProvider{domains: stub2}
+	_, err2 := p2.EnumerateAll(context.Background(), "infra.compute")
+	if err2 == nil {
+		t.Fatal("want error for unsupported resource type; got nil")
+	}
+}
+
 // ── browser config tests ──────────────────────────────────────────────────────
 
 // TestInitialize_ParsesBrowserConfig verifies that browser_path, browser_download,
