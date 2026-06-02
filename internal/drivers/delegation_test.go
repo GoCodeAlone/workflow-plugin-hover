@@ -534,3 +534,101 @@ func TestDelegationDriver_Diff_DomainChange_SetsBothNeedsUpdateAndReplace(t *tes
 		t.Error("NeedsUpdate=false; should be true alongside NeedsReplace")
 	}
 }
+
+func TestDelegationReadForImport_DualNS(t *testing.T) {
+	// Registrar (authoritative intent) returns dnsimple NS.
+	// Live public DNS returns digitalocean NS (simulates in-flight NS switch).
+	fc := &fakeDelegationClient{
+		getResult: &hoverclient.DomainDelegation{
+			ID:          "domain-x.com",
+			Name:        "x.com",
+			Nameservers: []string{"ns1.dnsimple.com"},
+		},
+	}
+	liveResolver := func(_ context.Context, domain string) ([]string, error) {
+		if domain != "x.com" {
+			t.Fatalf("resolver domain = %q, want x.com", domain)
+		}
+		return []string{"ns1.digitalocean.com"}, nil
+	}
+	d := NewDelegationDriverWithClientAndResolver(fc, liveResolver)
+
+	ref := interfaces.ResourceRef{Name: "x.com", Type: "infra.dns_delegation", ProviderID: "x.com"}
+	out, err := d.ReadForImport(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("ReadForImport: %v", err)
+	}
+	if out == nil {
+		t.Fatal("ReadForImport returned nil output")
+	}
+
+	// Primary "nameservers" key MUST equal the registrar NS (authoritative intent).
+	ns, ok := out.Outputs["nameservers"].([]any)
+	if !ok || len(ns) != 1 || ns[0] != "ns1.dnsimple.com" {
+		t.Errorf("nameservers = %v, want [ns1.dnsimple.com]", out.Outputs["nameservers"])
+	}
+
+	// registrar_nameservers MUST equal the registrar NS.
+	regNS, ok := out.Outputs["registrar_nameservers"].([]any)
+	if !ok || len(regNS) != 1 || regNS[0] != "ns1.dnsimple.com" {
+		t.Errorf("registrar_nameservers = %v, want [ns1.dnsimple.com]", out.Outputs["registrar_nameservers"])
+	}
+
+	// live_nameservers MUST equal the live DNS NS.
+	liveNS, ok := out.Outputs["live_nameservers"].([]any)
+	if !ok || len(liveNS) != 1 || liveNS[0] != "ns1.digitalocean.com" {
+		t.Errorf("live_nameservers = %v, want [ns1.digitalocean.com]", out.Outputs["live_nameservers"])
+	}
+
+	// Structural invariants.
+	if out.Name != "x.com" {
+		t.Errorf("Name = %q, want x.com", out.Name)
+	}
+	if out.Type != "infra.dns_delegation" {
+		t.Errorf("Type = %q, want infra.dns_delegation", out.Type)
+	}
+	if out.ProviderID != "x.com" {
+		t.Errorf("ProviderID = %q, want x.com", out.ProviderID)
+	}
+}
+
+func TestDelegationReadForImport_LiveLookupFailsGracefully(t *testing.T) {
+	// Registrar returns NS; live resolver errors → live_nameservers key omitted.
+	fc := &fakeDelegationClient{
+		getResult: &hoverclient.DomainDelegation{
+			ID:          "domain-y.com",
+			Name:        "y.com",
+			Nameservers: []string{"ns1.dnsimple.com"},
+		},
+	}
+	failingResolver := func(_ context.Context, _ string) ([]string, error) {
+		return nil, errors.New("DNS lookup failed")
+	}
+	d := NewDelegationDriverWithClientAndResolver(fc, failingResolver)
+
+	ref := interfaces.ResourceRef{Name: "y.com", Type: "infra.dns_delegation", ProviderID: "y.com"}
+	out, err := d.ReadForImport(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("ReadForImport: %v", err)
+	}
+	if out == nil {
+		t.Fatal("ReadForImport returned nil output")
+	}
+
+	// Primary "nameservers" key MUST be present from registrar.
+	ns, ok := out.Outputs["nameservers"].([]any)
+	if !ok || len(ns) != 1 || ns[0] != "ns1.dnsimple.com" {
+		t.Errorf("nameservers = %v, want [ns1.dnsimple.com]", out.Outputs["nameservers"])
+	}
+
+	// registrar_nameservers MUST be present.
+	regNS, ok := out.Outputs["registrar_nameservers"].([]any)
+	if !ok || len(regNS) != 1 || regNS[0] != "ns1.dnsimple.com" {
+		t.Errorf("registrar_nameservers = %v, want [ns1.dnsimple.com]", out.Outputs["registrar_nameservers"])
+	}
+
+	// live_nameservers MUST be absent when live lookup fails.
+	if _, present := out.Outputs["live_nameservers"]; present {
+		t.Errorf("live_nameservers should be absent when live lookup fails; got %v", out.Outputs["live_nameservers"])
+	}
+}

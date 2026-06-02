@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/GoCodeAlone/workflow-plugin-hover/internal/drivers"
 	"github.com/GoCodeAlone/workflow-plugin-hover/pkg/hoverclient"
 	"github.com/GoCodeAlone/workflow/interfaces"
 )
@@ -198,6 +199,154 @@ func TestHoverProvider_EnumerateAll_DNS_skipsBlankName(t *testing.T) {
 	}
 	if len(out) != 1 || out[0].ProviderID != "real.test" {
 		t.Fatalf("want 1 entry with ProviderID=real.test; got %+v", out)
+	}
+}
+
+// ── EnumerateAll(infra.dns_delegation) coverage ─────────────────────────────
+
+// TestEnumerateAll_DelegationListsDomains verifies that EnumerateAll for
+// "infra.dns_delegation" returns one ResourceOutput per domain with
+// ProviderID == domain.Name and Type == "infra.dns_delegation", and that
+// an unknown resource type still returns the unsupported error.
+func TestEnumerateAll_DelegationListsDomains(t *testing.T) {
+	stub := &fakeHoverClient{
+		domains: []hoverclient.Domain{
+			{ID: "1", Name: "a.com"},
+			{ID: "2", Name: "b.com"},
+		},
+	}
+	p := &HoverProvider{domains: stub}
+
+	out, err := p.EnumerateAll(context.Background(), "infra.dns_delegation")
+	if err != nil {
+		t.Fatalf("EnumerateAll(infra.dns_delegation): %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("want 2 outputs; got %d", len(out))
+	}
+	for i, want := range []string{"a.com", "b.com"} {
+		if out[i].ProviderID != want {
+			t.Errorf("out[%d].ProviderID = %q; want %q", i, out[i].ProviderID, want)
+		}
+		if out[i].Type != "infra.dns_delegation" {
+			t.Errorf("out[%d].Type = %q; want infra.dns_delegation", i, out[i].Type)
+		}
+	}
+	if stub.calls != 1 {
+		t.Errorf("ListDomains called %d times; want 1", stub.calls)
+	}
+
+	// Unknown resource type must still return the unsupported error.
+	stub2 := &fakeHoverClient{}
+	p2 := &HoverProvider{domains: stub2}
+	_, err2 := p2.EnumerateAll(context.Background(), "infra.compute")
+	if err2 == nil {
+		t.Fatal("want error for unsupported resource type; got nil")
+	}
+}
+
+// ── Import delegation dual-fetch coverage ────────────────────────────────────
+
+// fakeDelegationClientForImport satisfies HoverDelegationClient and
+// hoverDomainLister so it can be injected into both the DelegationDriver
+// and HoverProvider.domains field. It also satisfies hoverclient.HoverClient
+// via a nil client stored in drivers so we need a separate provider-level stub.
+type fakeDelegationClientForImport struct {
+	registrarNS []string
+	registrarErr error
+}
+
+func (f *fakeDelegationClientForImport) GetDomainDelegation(_ context.Context, _ string) (*hoverclient.DomainDelegation, error) {
+	if f.registrarErr != nil {
+		return nil, f.registrarErr
+	}
+	return &hoverclient.DomainDelegation{
+		ID:          "domain-x.com",
+		Name:        "x.com",
+		Nameservers: f.registrarNS,
+	}, nil
+}
+
+func (f *fakeDelegationClientForImport) SetNameservers(_ context.Context, _ string, _ []string) error {
+	return nil
+}
+
+// TestImport_DelegationUsesRegistrarNotLiveRead verifies that
+// HoverProvider.Import for infra.dns_delegation calls ReadForImport (which
+// fetches the registrar NS authoritatively) rather than falling through to
+// the live-first DelegationDriver.Read path.
+func TestImport_DelegationUsesRegistrarNotLiveRead(t *testing.T) {
+	registrarNS := []string{"ns1.dnsimple.com"}
+	liveNS := []string{"ns1.digitalocean.com"}
+
+	fc := &fakeDelegationClientForImport{registrarNS: registrarNS}
+
+	// Build a DelegationDriver with a resolver that returns different (live) NS.
+	liveResolver := func(_ context.Context, _ string) ([]string, error) {
+		return liveNS, nil
+	}
+
+	delegDriver := drivers.NewDelegationDriverWithClientAndResolver(fc, liveResolver)
+
+	p := &HoverProvider{
+		drivers: map[string]interfaces.ResourceDriver{
+			"infra.dns_delegation": delegDriver,
+			"infra.dns":            &noopCreateDriver{},
+		},
+	}
+
+	state, err := p.Import(context.Background(), "x.com", "infra.dns_delegation")
+	if err != nil {
+		t.Fatalf("Import(infra.dns_delegation): %v", err)
+	}
+	if state == nil {
+		t.Fatal("Import returned nil state")
+	}
+
+	// registrar_nameservers must be the REGISTRAR value (not live).
+	regNS, ok := state.Outputs["registrar_nameservers"].([]any)
+	if !ok || len(regNS) != 1 || regNS[0] != "ns1.dnsimple.com" {
+		t.Errorf("registrar_nameservers = %v, want [ns1.dnsimple.com]", state.Outputs["registrar_nameservers"])
+	}
+
+	// live_nameservers must be the LIVE DNS value.
+	liveNSOut, ok := state.Outputs["live_nameservers"].([]any)
+	if !ok || len(liveNSOut) != 1 || liveNSOut[0] != "ns1.digitalocean.com" {
+		t.Errorf("live_nameservers = %v, want [ns1.digitalocean.com]", state.Outputs["live_nameservers"])
+	}
+
+	// Primary nameservers must equal registrar (authoritative intent).
+	ns, ok := state.Outputs["nameservers"].([]any)
+	if !ok || len(ns) != 1 || ns[0] != "ns1.dnsimple.com" {
+		t.Errorf("nameservers = %v, want [ns1.dnsimple.com]", state.Outputs["nameservers"])
+	}
+
+	// ResourceState structural invariants.
+	if state.Provider != "hover" {
+		t.Errorf("Provider = %q, want hover", state.Provider)
+	}
+	if state.Type != "infra.dns_delegation" {
+		t.Errorf("Type = %q, want infra.dns_delegation", state.Type)
+	}
+	if state.AppliedConfigSource != "adoption" {
+		t.Errorf("AppliedConfigSource = %q, want adoption", state.AppliedConfigSource)
+	}
+}
+
+// TestImport_DNSUnchanged verifies that Import for infra.dns still goes
+// through the generic d.Read path (not the delegation dual-fetch).
+func TestImport_DNSUnchanged(t *testing.T) {
+	// noopCreateDriver.Read returns nil — Import must not panic or break.
+	p := &HoverProvider{
+		drivers: map[string]interfaces.ResourceDriver{
+			"infra.dns":            &noopCreateDriver{},
+			"infra.dns_delegation": &noopCreateDriver{},
+		},
+	}
+	// infra.dns with nil Read output → Import returns an error (nil output guard).
+	_, err := p.Import(context.Background(), "x.com", "infra.dns")
+	if err == nil {
+		t.Fatal("expected error when driver.Read returns nil output for infra.dns")
 	}
 }
 
