@@ -731,6 +731,103 @@ func TestNewClient_DefaultsToBrowserBackendWithoutInjectedHTTP(t *testing.T) {
 	}
 }
 
+// ── retry / back-off tests ────────────────────────────────────────────────────
+
+// TestClient_RetriesOn429 verifies that a 429 response causes the client to
+// retry and eventually succeed when the server starts returning 200.
+func TestClient_RetriesOn429(t *testing.T) {
+	var callCount int
+	respBody := `{"succeeded":true,"domains":[{"id":"dom1","domain_name":"alpha.test"}]}`
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/signin/auth.json", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "completed"})
+	})
+	mux.HandleFunc("/api/domains", func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount <= 2 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, respBody)
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	jar, _ := cookiejar.New(nil)
+	httpc := &http.Client{
+		Jar:       jar,
+		Transport: rewriteTransport{base: srv.URL},
+	}
+	creds := Credentials{Username: "alice", Password: "pw"}
+	c, err := NewClient(creds, httpc)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	// Speed up backoff so the test runs fast.
+	retryBaseDelay = 1 * time.Millisecond
+	defer func() { retryBaseDelay = 1 * time.Second }()
+
+	domains, err := c.ListDomains(context.Background())
+	if err != nil {
+		t.Fatalf("ListDomains: %v", err)
+	}
+	if len(domains) != 1 || domains[0].Name != "alpha.test" {
+		t.Errorf("unexpected domains: %+v", domains)
+	}
+	if callCount != 3 {
+		t.Errorf("server received %d calls, want 3", callCount)
+	}
+}
+
+// TestClient_429GivesUpAfterMax verifies that the client gives up after
+// maxRetries attempts and returns an error mentioning 429.
+func TestClient_429GivesUpAfterMax(t *testing.T) {
+	var callCount int
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/signin/auth.json", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "completed"})
+	})
+	mux.HandleFunc("/api/domains", func(w http.ResponseWriter, _ *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	jar, _ := cookiejar.New(nil)
+	httpc := &http.Client{
+		Jar:       jar,
+		Transport: rewriteTransport{base: srv.URL},
+	}
+	creds := Credentials{Username: "alice", Password: "pw"}
+	c, err := NewClient(creds, httpc)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	// Speed up backoff.
+	retryBaseDelay = 1 * time.Millisecond
+	defer func() { retryBaseDelay = 1 * time.Second }()
+
+	_, err = c.ListDomains(context.Background())
+	if err == nil {
+		t.Fatal("expected error after max retries; got nil")
+	}
+	if !strings.Contains(err.Error(), "429") {
+		t.Errorf("error should mention 429, got: %v", err)
+	}
+	// Should have tried maxRetries+1 times total (initial + retries), not loop forever.
+	maxExpected := maxRetries + 2 // a bit of headroom
+	if callCount > maxExpected {
+		t.Errorf("callCount = %d, exceeds maxExpected %d (possible infinite loop)", callCount, maxExpected)
+	}
+}
+
 // TestNewClientWithOptions_PreservesExplicitBrowserConfig verifies that
 // explicit ClientOptions.Browser values survive NewClientWithOptions.
 func TestNewClientWithOptions_PreservesExplicitBrowserConfig(t *testing.T) {
