@@ -7,10 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"math/rand/v2"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,7 +23,16 @@ const (
 	hoverHost         = "https://www.hover.com"
 	defaultUserAgent  = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 	sessionStaleAfter = 1 * time.Hour
+	maxBackoffCap     = 30 * time.Second
 )
+
+// retryBaseDelay is the initial backoff duration for 429/503 retries.
+// Overridable in tests (set to a small value to keep tests fast).
+var retryBaseDelay = 1 * time.Second
+
+// maxRetries is the maximum number of retry attempts after a 429/503.
+// Overridable in tests.
+var maxRetries = 5
 
 // Credentials carries the operator-provided login material.
 type Credentials struct {
@@ -95,6 +107,80 @@ func NewClientWithOptions(creds Credentials, httpClient *http.Client, opts Clien
 		UserAgent: defaultUserAgent,
 		backend:   backend,
 	}, nil
+}
+
+// do executes req via c.http.Do, retrying on HTTP 429 (Too Many Requests) and
+// 503 (Service Unavailable) with exponential back-off.
+//
+// Back-off: if the response includes a numeric Retry-After header its value is
+// used directly; otherwise the wait is retryBaseDelay * 2^attempt with ±10 %
+// jitter, capped at maxBackoffCap (30 s).
+//
+// Safety: do only retries when req.Body is nil or re-readable (GetBody != nil).
+// One-shot bodies (e.g. POST with a streaming body) are returned as-is after
+// the first response so the caller's body is never consumed twice.
+//
+// Context cancellation during a back-off sleep is honoured: do returns
+// ctx.Err() immediately when the context is done.
+func (c *Client) do(req *http.Request) (*http.Response, error) {
+	// Don't retry requests with a one-shot body.
+	bodyRetryable := req.Body == nil || req.GetBody != nil
+
+	for attempt := 0; ; attempt++ {
+		// Re-create the body for retries when possible.
+		if attempt > 0 && req.GetBody != nil {
+			body, err := req.GetBody()
+			if err != nil {
+				return nil, fmt.Errorf("hover: re-create request body for retry: %w", err)
+			}
+			req.Body = body
+		}
+
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		// Non-retryable status or body is one-shot → return immediately.
+		if (resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode != http.StatusServiceUnavailable) ||
+			!bodyRetryable {
+			return resp, nil
+		}
+
+		// Drain and close so the connection can be reused.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+
+		if attempt >= maxRetries {
+			return nil, fmt.Errorf("hover: request to %s failed after %d retries: HTTP %d",
+				req.URL.Path, maxRetries, resp.StatusCode)
+		}
+
+		// Compute wait duration.
+		wait := retryBaseDelay * time.Duration(math.Pow(2, float64(attempt)))
+		if wait > maxBackoffCap {
+			wait = maxBackoffCap
+		}
+		// Honor Retry-After header if present and numeric.
+		if ra := resp.Header.Get("Retry-After"); ra != "" {
+			if secs, parseErr := strconv.Atoi(ra); parseErr == nil && secs >= 0 {
+				wait = time.Duration(secs) * time.Second
+			}
+		}
+		// Add ±10 % jitter to spread concurrent retries.
+		// Non-security use: jitter is for load spreading, not randomness quality.
+		jitter := time.Duration(float64(wait) * (rand.Float64()*0.2 - 0.1)) //nolint:gosec
+		wait += jitter
+		if wait < 0 {
+			wait = 0
+		}
+
+		select {
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		case <-time.After(wait):
+		}
+	}
 }
 
 // Login performs a full authentication cycle against Hover's control panel.
@@ -197,7 +283,7 @@ func (c *Client) fetchControlPanelCSRFLocked(ctx context.Context, domainName str
 	endpoint := fmt.Sprintf("%s/control_panel/domain/%s", hoverHost, url.PathEscape(domainName))
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	req.Header.Set("User-Agent", c.UserAgent)
-	resp, err := c.http.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return "", fmt.Errorf("hover: fetch control_panel CSRF for %q: %w", domainName, err)
 	}
@@ -333,7 +419,7 @@ func (c *Client) getDomainDelegationHTTP(ctx context.Context, domainName string)
 	endpoint := fmt.Sprintf("%s/api/control_panel/domains/domain-%s", hoverHost, url.PathEscape(domainName))
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	req.Header.Set("User-Agent", c.UserAgent)
-	resp, err := c.http.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("hover: GetDomainDelegation %q: %w", domainName, err)
 	}
@@ -446,7 +532,7 @@ func (c *Client) listDomainsHTTP(ctx context.Context) ([]Domain, error) {
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", c.UserAgent)
-	resp, err := c.http.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("hover: ListDomains: %w", err)
 	}
@@ -484,7 +570,7 @@ func (c *Client) getDomainHTTP(ctx context.Context, domain string) (*Domain, err
 	endpoint := fmt.Sprintf("%s/api/domains/%s/dns", hoverHost, url.PathEscape(domain))
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	req.Header.Set("User-Agent", c.UserAgent)
-	resp, err := c.http.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -521,7 +607,7 @@ func (c *Client) listRecordsHTTP(ctx context.Context, domain string) ([]DNSRecor
 	endpoint := fmt.Sprintf("%s/api/domains/%s/dns", hoverHost, url.PathEscape(domain))
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	req.Header.Set("User-Agent", c.UserAgent)
-	resp, err := c.http.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, err
 	}
