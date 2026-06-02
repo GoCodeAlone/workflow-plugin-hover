@@ -257,6 +257,12 @@ func (p *HoverProvider) DetectDrift(ctx context.Context, resources []interfaces.
 
 // Import reads an existing Hover-managed resource and returns IaC adoption
 // state. cloudID is the domain name for both infra.dns and infra.dns_delegation.
+//
+// For infra.dns_delegation, Import uses DelegationDriver.ReadForImport so that
+// the registrar NS (authoritative intent) is captured as the primary value, and
+// the live public NS is recorded as a propagation annotation. This avoids the
+// live-first semantics of DelegationDriver.Read, which would capture stale TTL-
+// cached NS during an in-flight NS switch.
 func (p *HoverProvider) Import(ctx context.Context, cloudID string, resourceType string) (*interfaces.ResourceState, error) {
 	if cloudID == "" {
 		return nil, fmt.Errorf("hover import: provider_id is required")
@@ -264,17 +270,46 @@ func (p *HoverProvider) Import(ctx context.Context, cloudID string, resourceType
 	if resourceType == "" {
 		resourceType = "infra.dns"
 	}
+
+	ref := interfaces.ResourceRef{Name: cloudID, Type: resourceType, ProviderID: cloudID}
+
+	// Delegation import: use the dual-fetch ReadForImport path so the
+	// registrar NS (not the live-first Read result) is the authoritative value.
+	if resourceType == "infra.dns_delegation" {
+		d, err := p.ResourceDriver(resourceType)
+		if err != nil {
+			return nil, err
+		}
+		if dd, ok := d.(*drivers.DelegationDriver); ok {
+			out, err := dd.ReadForImport(ctx, ref)
+			if err != nil {
+				return nil, fmt.Errorf("hover import %q: %w", cloudID, err)
+			}
+			if out == nil {
+				return nil, fmt.Errorf("hover import %q: driver returned nil output", cloudID)
+			}
+			return buildResourceState(cloudID, out), nil
+		}
+	}
+
 	d, err := p.ResourceDriver(resourceType)
 	if err != nil {
 		return nil, err
 	}
-	out, err := d.Read(ctx, interfaces.ResourceRef{Name: cloudID, Type: resourceType, ProviderID: cloudID})
+	out, err := d.Read(ctx, ref)
 	if err != nil {
 		return nil, fmt.Errorf("hover import %q: %w", cloudID, err)
 	}
 	if out == nil {
 		return nil, fmt.Errorf("hover import %q: driver returned nil output", cloudID)
 	}
+	return buildResourceState(cloudID, out), nil
+}
+
+// buildResourceState constructs a ResourceState from a ResourceOutput.
+// Used by Import to ensure the delegation and generic Read paths produce an
+// identical ResourceState shape.
+func buildResourceState(cloudID string, out *interfaces.ResourceOutput) *interfaces.ResourceState {
 	now := time.Now()
 	id := out.ProviderID
 	if id == "" {
@@ -290,7 +325,7 @@ func (p *HoverProvider) Import(ctx context.Context, cloudID string, resourceType
 		Outputs:             out.Outputs,
 		CreatedAt:           now,
 		UpdatedAt:           now,
-	}, nil
+	}
 }
 
 // ResolveSizing is a stub: Hover has no compute sizing.

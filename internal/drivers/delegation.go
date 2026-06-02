@@ -209,6 +209,50 @@ func lookupPublicNameservers(ctx context.Context, domain string) ([]string, erro
 	return out, nil
 }
 
+// ReadForImport fetches both the registrar (authoritative) and live public
+// nameservers, returning them in a single ResourceOutput. Unlike Read, this
+// method always calls GetDomainDelegation first (registrar = authoritative
+// intent); the live resolver is called best-effort and its result is omitted
+// if unavailable. The primary "nameservers" key equals the registrar NS so
+// existing Diff / nameserversFromOutputs semantics remain consistent.
+//
+// This is the import-path equivalent of Read; it MUST NOT be used for drift
+// detection or apply (those continue to use Read).
+func (d *DelegationDriver) ReadForImport(ctx context.Context, ref interfaces.ResourceRef) (*interfaces.ResourceOutput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("dns_delegation read-for-import %q: %w", ref.Name, err)
+	}
+	domain := ref.ProviderID
+	if domain == "" {
+		domain = ref.Name
+	}
+
+	// Registrar is authoritative — any error is a hard failure.
+	dom, err := d.client.GetDomainDelegation(ctx, domain)
+	if err != nil {
+		return nil, fmt.Errorf("dns_delegation read-for-import %q: %w", ref.Name, err)
+	}
+
+	outputs := map[string]any{
+		"nameservers":           nameserversToAny(dom.Nameservers),
+		"registrar_nameservers": nameserversToAny(dom.Nameservers),
+	}
+
+	// Live resolver is best-effort; omit live_nameservers on any failure.
+	if d.nsResolver != nil {
+		if liveNS, liveErr := d.nsResolver(ctx, domain); liveErr == nil && len(liveNS) > 0 {
+			outputs["live_nameservers"] = nameserversToAny(liveNS)
+		}
+	}
+
+	return &interfaces.ResourceOutput{
+		Name:       ref.Name,
+		Type:       "infra.dns_delegation",
+		ProviderID: domain,
+		Outputs:    outputs,
+	}, nil
+}
+
 // Update replaces the registrar nameservers. Rejects in-place domain
 // renames (those must route through Diff → NeedsReplace → Delete-then-Create).
 func (d *DelegationDriver) Update(ctx context.Context, ref interfaces.ResourceRef, spec interfaces.ResourceSpec) (*interfaces.ResourceOutput, error) {
