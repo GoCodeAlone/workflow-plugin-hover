@@ -50,6 +50,11 @@ type Client struct {
 	loggedAt  time.Time
 	UserAgent string
 	backend   executionBackend
+	// domainNS caches nameservers keyed by domain name. Populated by
+	// listDomainsHTTP so GetDomainDelegation can short-circuit the
+	// per-domain GET when a prior ListDomains call has already fetched them.
+	// Guarded by mu.
+	domainNS map[string][]string
 }
 
 // NewClient returns a fresh Client. Pass httpClient=nil for the browser
@@ -393,9 +398,10 @@ type DNSRecord struct {
 
 // Domain is the API shape returned by GET /api/domains.
 type Domain struct {
-	ID      string      `json:"id"`
-	Name    string      `json:"domain_name"`
-	Records []DNSRecord `json:"entries"`
+	ID          string      `json:"id"`
+	Name        string      `json:"domain_name"`
+	Records     []DNSRecord `json:"entries"`
+	Nameservers []string    `json:"nameservers"`
 }
 
 // GetDomainDelegation fetches the registrar-level nameserver delegation for
@@ -412,12 +418,38 @@ func (c *Client) GetDomainDelegation(ctx context.Context, domainName string) (*D
 }
 
 // getDomainDelegationHTTP is the HTTP-backend implementation of GetDomainDelegation.
+//
+// Read path (in priority order):
+//  1. NS cache (populated by listDomainsHTTP from GET /api/domains).
+//     A non-empty cache hit short-circuits the network call entirely.
+//  2. Per-domain fallback: GET /api/domains/<name>
+//     Used when no prior ListDomains call has populated the cache.
+//
+// The old GET /api/control_panel/domains/domain-<name> is PUT-only on live
+// Hover (returns 404 on GET). It is never used for reads.
 func (c *Client) getDomainDelegationHTTP(ctx context.Context, domainName string) (*DomainDelegation, error) {
 	if err := c.ensureLogin(ctx); err != nil {
 		return nil, err
 	}
-	endpoint := fmt.Sprintf("%s/api/control_panel/domains/domain-%s", hoverHost, url.PathEscape(domainName))
+
+	// 1. Check NS cache (populated by ListDomains).
+	c.mu.Lock()
+	cached, ok := c.domainNS[domainName]
+	if ok {
+		ns := make([]string, len(cached))
+		copy(ns, cached)
+		c.mu.Unlock()
+		if len(ns) == 0 {
+			return nil, fmt.Errorf("hover: GetDomainDelegation %q: %w", domainName, ErrEmptyNameservers)
+		}
+		return &DomainDelegation{Name: domainName, Nameservers: ns}, nil
+	}
+	c.mu.Unlock()
+
+	// 2. Cache miss — fall back to per-domain GET /api/domains/<name>.
+	endpoint := fmt.Sprintf("%s/api/domains/%s", hoverHost, url.PathEscape(domainName))
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", c.UserAgent)
 	resp, err := c.do(req)
 	if err != nil {
@@ -428,14 +460,22 @@ func (c *Client) getDomainDelegationHTTP(ctx context.Context, domainName string)
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, fmt.Errorf("hover: GetDomainDelegation %q: HTTP %d: %s", domainName, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	var d DomainDelegation
-	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+	// The per-domain endpoint wraps the domain in {"succeeded":...,"domain":{...}}.
+	var wrap struct {
+		Succeeded bool   `json:"succeeded"`
+		Domain    Domain `json:"domain"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&wrap); err != nil {
 		return nil, fmt.Errorf("hover: GetDomainDelegation %q: decode: %w", domainName, err)
 	}
-	if len(d.Nameservers) == 0 {
+	if len(wrap.Domain.Nameservers) == 0 {
 		return nil, fmt.Errorf("hover: GetDomainDelegation %q: %w", domainName, ErrEmptyNameservers)
 	}
-	return &d, nil
+	return &DomainDelegation{
+		ID:          wrap.Domain.ID,
+		Name:        wrap.Domain.Name,
+		Nameservers: wrap.Domain.Nameservers,
+	}, nil
 }
 
 // SetNameservers updates the registrar-level nameservers for a domain via
@@ -551,6 +591,22 @@ func (c *Client) listDomainsHTTP(ctx context.Context) ([]Domain, error) {
 	if !body.Succeeded {
 		return nil, fmt.Errorf("hover: ListDomains: API returned succeeded=false")
 	}
+	// Populate the NS cache so subsequent GetDomainDelegation calls can
+	// short-circuit the per-domain GET (the list endpoint already includes
+	// nameservers for every domain in one call).
+	c.mu.Lock()
+	if c.domainNS == nil {
+		c.domainNS = make(map[string][]string, len(body.Domains))
+	}
+	for _, d := range body.Domains {
+		if d.Name == "" {
+			continue
+		}
+		ns := make([]string, len(d.Nameservers))
+		copy(ns, d.Nameservers)
+		c.domainNS[d.Name] = ns
+	}
+	c.mu.Unlock()
 	return body.Domains, nil
 }
 
