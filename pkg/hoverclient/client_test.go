@@ -464,11 +464,13 @@ func TestFetchControlPanelCSRFLocked_Non2xx(t *testing.T) {
 }
 
 func TestGetDomainDelegation_HappyPath(t *testing.T) {
+	// No prior ListDomains → cache is empty → falls back to GET /api/domains/<name>.
+	// The per-domain endpoint wraps the result in {"succeeded":true,"domain":{...}}.
 	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/control_panel/domains/domain-example.com" {
+		if r.URL.Path != "/api/domains/example.com" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-		_, _ = w.Write([]byte(`{"id":"domain-example.com","domain_name":"example.com","nameservers":["ns1.do.com","ns2.do.com"]}`))
+		_, _ = w.Write([]byte(`{"succeeded":true,"domain":{"id":"domain-example.com","domain_name":"example.com","nameservers":["ns1.do.com","ns2.do.com"]}}`))
 	})
 	defer srv.Close()
 	c.loggedAt = time.Now()
@@ -486,8 +488,9 @@ func TestGetDomainDelegation_HappyPath(t *testing.T) {
 }
 
 func TestGetDomainDelegation_EmptyNameserversReturnsSentinel(t *testing.T) {
+	// No cache → per-domain GET returns empty nameservers → ErrEmptyNameservers.
 	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"id":"domain-example.com","domain_name":"example.com","nameservers":[]}`))
+		_, _ = w.Write([]byte(`{"succeeded":true,"domain":{"id":"domain-example.com","domain_name":"example.com","nameservers":[]}}`))
 	})
 	defer srv.Close()
 	c.loggedAt = time.Now()
@@ -825,6 +828,138 @@ func TestClient_429GivesUpAfterMax(t *testing.T) {
 	maxExpected := maxRetries + 2 // a bit of headroom
 	if callCount > maxExpected {
 		t.Errorf("callCount = %d, exceeds maxExpected %d (possible infinite loop)", callCount, maxExpected)
+	}
+}
+
+// ── delegation read endpoint fix tests ───────────────────────────────────────
+
+// TestListDomains_ParsesNameservers verifies that /api/domains includes
+// nameservers for each domain and they are surfaced in the returned []Domain.
+func TestListDomains_ParsesNameservers(t *testing.T) {
+	respBody := `{
+		"succeeded": true,
+		"domains": [
+			{"id":"dom1","domain_name":"a.com","nameservers":["ns1.x","ns2.x"]},
+			{"id":"dom2","domain_name":"b.com","nameservers":[]}
+		]
+	}`
+	c, srv := newRecordStub(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/domains" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, respBody)
+	})
+	defer srv.Close()
+
+	domains, err := c.ListDomains(context.Background())
+	if err != nil {
+		t.Fatalf("ListDomains: %v", err)
+	}
+	if len(domains) != 2 {
+		t.Fatalf("want 2 domains; got %d", len(domains))
+	}
+	if got := domains[0].Nameservers; len(got) != 2 || got[0] != "ns1.x" || got[1] != "ns2.x" {
+		t.Errorf("domains[0].Nameservers = %v; want [ns1.x ns2.x]", got)
+	}
+	if got := domains[1].Nameservers; len(got) != 0 {
+		t.Errorf("domains[1].Nameservers = %v; want empty", got)
+	}
+}
+
+// TestGetDomainDelegation_UsesCacheFromListDomains verifies that after
+// ListDomains populates the NS cache, GetDomainDelegation returns cached
+// values without hitting /api/domains/<name>.
+func TestGetDomainDelegation_UsesCacheFromListDomains(t *testing.T) {
+	var perDomainHits int
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/signin/auth.json", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "completed"})
+	})
+	mux.HandleFunc("/api/domains", func(w http.ResponseWriter, r *http.Request) {
+		// Return a.com with ns1.x — only exact /api/domains (not /api/domains/*)
+		if r.URL.Path != "/api/domains" {
+			// This is a per-domain fallback hit — count it.
+			perDomainHits++
+			http.Error(w, "should not be called", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"succeeded":true,"domains":[{"id":"dom1","domain_name":"a.com","nameservers":["ns1.x"]}]}`)
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	jar, _ := cookiejar.New(nil)
+	httpc := &http.Client{Jar: jar, Transport: rewriteTransport{base: srv.URL}}
+	c, err := NewClient(Credentials{Username: "alice", Password: "pw"}, httpc)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	// Populate the cache.
+	if _, err := c.ListDomains(context.Background()); err != nil {
+		t.Fatalf("ListDomains: %v", err)
+	}
+
+	// Now call GetDomainDelegation — should use the cache, NOT the per-domain endpoint.
+	d, err := c.GetDomainDelegation(context.Background(), "a.com")
+	if err != nil {
+		t.Fatalf("GetDomainDelegation: %v", err)
+	}
+	if len(d.Nameservers) != 1 || d.Nameservers[0] != "ns1.x" {
+		t.Errorf("Nameservers = %v; want [ns1.x]", d.Nameservers)
+	}
+	if perDomainHits > 0 {
+		t.Errorf("per-domain endpoint was hit %d times; want 0 (cache should serve)", perDomainHits)
+	}
+}
+
+// TestGetDomainDelegation_FallsBackToPerDomainGET verifies that when the cache
+// is empty (no prior ListDomains), GetDomainDelegation falls back to
+// GET /api/domains/<name> and does NOT hit /api/control_panel/domains/domain-<name>.
+func TestGetDomainDelegation_FallsBackToPerDomainGET(t *testing.T) {
+	var controlPanelHits int
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/signin/auth.json", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "completed"})
+	})
+	mux.HandleFunc("/api/domains/", func(w http.ResponseWriter, r *http.Request) {
+		// Per-domain GET: /api/domains/a.com
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"succeeded":true,"domain":{"id":"dom1","domain_name":"a.com","nameservers":["ns9.x"]}}`)
+	})
+	mux.HandleFunc("/api/control_panel/", func(w http.ResponseWriter, r *http.Request) {
+		controlPanelHits++
+		http.Error(w, "should not be called", http.StatusNotFound)
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	jar, _ := cookiejar.New(nil)
+	httpc := &http.Client{Jar: jar, Transport: rewriteTransport{base: srv.URL}}
+	c, err := NewClient(Credentials{Username: "alice", Password: "pw"}, httpc)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	c.loggedAt = time.Now() // skip login
+
+	// No ListDomains call — cache is empty.
+	d, err := c.GetDomainDelegation(context.Background(), "a.com")
+	if err != nil {
+		t.Fatalf("GetDomainDelegation: %v", err)
+	}
+	if len(d.Nameservers) != 1 || d.Nameservers[0] != "ns9.x" {
+		t.Errorf("Nameservers = %v; want [ns9.x]", d.Nameservers)
+	}
+	if controlPanelHits > 0 {
+		t.Errorf("control_panel endpoint was hit %d times; want 0", controlPanelHits)
 	}
 }
 
