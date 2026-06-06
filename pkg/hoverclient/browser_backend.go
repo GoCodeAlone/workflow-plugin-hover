@@ -306,6 +306,12 @@ func (b *browserBackend) probeExistingSession(ctx context.Context, c *Client) (b
 	req.Header.Set("User-Agent", c.UserAgent)
 	resp, err := c.do(req)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return false, err
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false, ctxErr
+		}
 		return false, nil
 	}
 	defer resp.Body.Close()

@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -477,10 +478,10 @@ func TestBrowserBackend_LoginSkipsWhenFresh(t *testing.T) {
 	opts := newBrowserTestOpts(t)
 
 	// Count how many times the signin page is hit.
-	signinHits := 0
+	var signinHits atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/signin", func(w http.ResponseWriter, r *http.Request) {
-		signinHits++
+		signinHits.Add(1)
 		http.SetCookie(w, &http.Cookie{Name: "__uzma", Value: "fake", Path: "/"})
 		_, _ = w.Write([]byte(`<html><body>signin</body></html>`))
 	})
@@ -502,7 +503,7 @@ func TestBrowserBackend_LoginSkipsWhenFresh(t *testing.T) {
 	if err := c.Login(ctx); err != nil {
 		t.Fatalf("first Login: %v", err)
 	}
-	firstHits := signinHits
+	firstHits := signinHits.Load()
 
 	// Second login: session is fresh — should not re-navigate.
 	if err := c.Login(ctx); err != nil {
@@ -510,18 +511,18 @@ func TestBrowserBackend_LoginSkipsWhenFresh(t *testing.T) {
 	}
 
 	// Signin page must not have been hit again.
-	if signinHits != firstHits {
-		t.Errorf("browser re-launched on second Login; signin page hit count went from %d to %d", firstHits, signinHits)
+	if got := signinHits.Load(); got != firstHits {
+		t.Errorf("browser re-launched on second Login; signin page hit count went from %d to %d", firstHits, got)
 	}
 }
 
 func TestBrowserBackend_LoginReusesWarmBrowserProfileSession(t *testing.T) {
 	opts := newBrowserTestOpts(t)
 
-	var signinHits, authHits, domainsHits int
+	var signinHits, authHits, domainsHits atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/domains", func(w http.ResponseWriter, r *http.Request) {
-		domainsHits++
+		domainsHits.Add(1)
 		if _, err := r.Cookie("__uzma"); err != nil {
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = w.Write([]byte(`{"succeeded":false,"error_code":"login"}`))
@@ -531,12 +532,12 @@ func TestBrowserBackend_LoginReusesWarmBrowserProfileSession(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"succeeded": true, "domains": []map[string]any{}})
 	})
 	mux.HandleFunc("/signin", func(w http.ResponseWriter, r *http.Request) {
-		signinHits++
+		signinHits.Add(1)
 		http.SetCookie(w, &http.Cookie{Name: "__uzma", Value: "fresh-from-signin", Path: "/"})
 		_, _ = w.Write([]byte(`<html><body>signin</body></html>`))
 	})
 	mux.HandleFunc("/signin/auth.json", func(w http.ResponseWriter, r *http.Request) {
-		authHits++
+		authHits.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"succeeded": true, "status": "completed"})
 	})
@@ -555,10 +556,10 @@ func TestBrowserBackend_LoginReusesWarmBrowserProfileSession(t *testing.T) {
 	if err := c.Login(ctx); err != nil {
 		t.Fatalf("Login with warm profile: %v", err)
 	}
-	if signinHits != 0 || authHits != 0 {
-		t.Fatalf("warm profile should skip credential login; signinHits=%d authHits=%d", signinHits, authHits)
+	if gotSignin, gotAuth := signinHits.Load(), authHits.Load(); gotSignin != 0 || gotAuth != 0 {
+		t.Fatalf("warm profile should skip credential login; signinHits=%d authHits=%d", gotSignin, gotAuth)
 	}
-	if domainsHits == 0 {
+	if domainsHits.Load() == 0 {
 		t.Fatal("warm profile login did not probe /api/domains")
 	}
 	c.mu.Lock()
@@ -569,23 +570,43 @@ func TestBrowserBackend_LoginReusesWarmBrowserProfileSession(t *testing.T) {
 	}
 }
 
+func TestBrowserBackend_ProbeExistingSessionReturnsContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	bb := newBrowserBackend(BrowserOptions{})
+	bb.overrideHost = "http://127.0.0.1:1"
+	c := &Client{
+		http:      &http.Client{},
+		UserAgent: defaultUserAgent,
+	}
+
+	ok, err := bb.probeExistingSession(ctx, c)
+	if ok {
+		t.Fatal("probeExistingSession unexpectedly reused a canceled session")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("probeExistingSession error = %v, want context.Canceled", err)
+	}
+}
+
 func TestBrowserBackend_LoginFallsBackWhenWarmProfileUnauthenticated(t *testing.T) {
 	opts := newBrowserTestOpts(t)
 
-	var signinHits, authHits, domainsHits int
+	var signinHits, authHits, domainsHits atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/domains", func(w http.ResponseWriter, r *http.Request) {
-		domainsHits++
+		domainsHits.Add(1)
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"succeeded":false,"error_code":"login"}`))
 	})
 	mux.HandleFunc("/signin", func(w http.ResponseWriter, r *http.Request) {
-		signinHits++
+		signinHits.Add(1)
 		http.SetCookie(w, &http.Cookie{Name: "__uzma", Value: "fresh-from-signin", Path: "/"})
 		_, _ = w.Write([]byte(`<html><body>signin</body></html>`))
 	})
 	mux.HandleFunc("/signin/auth.json", func(w http.ResponseWriter, r *http.Request) {
-		authHits++
+		authHits.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"succeeded": true, "status": "completed"})
 	})
@@ -603,11 +624,11 @@ func TestBrowserBackend_LoginFallsBackWhenWarmProfileUnauthenticated(t *testing.
 	if err := c.Login(ctx); err != nil {
 		t.Fatalf("Login after stale warm profile probe: %v", err)
 	}
-	if domainsHits == 0 {
+	if domainsHits.Load() == 0 {
 		t.Fatal("stale profile login did not probe /api/domains before fallback")
 	}
-	if signinHits == 0 || authHits == 0 {
-		t.Fatalf("stale profile should fall back to credential login; signinHits=%d authHits=%d", signinHits, authHits)
+	if gotSignin, gotAuth := signinHits.Load(), authHits.Load(); gotSignin == 0 || gotAuth == 0 {
+		t.Fatalf("stale profile should fall back to credential login; signinHits=%d authHits=%d", gotSignin, gotAuth)
 	}
 }
 
