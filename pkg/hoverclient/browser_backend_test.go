@@ -18,6 +18,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/GoCodeAlone/rod/lib/proto"
 )
 
 // --------------------------------------------------------------------------
@@ -510,6 +512,125 @@ func TestBrowserBackend_LoginSkipsWhenFresh(t *testing.T) {
 	// Signin page must not have been hit again.
 	if signinHits != firstHits {
 		t.Errorf("browser re-launched on second Login; signin page hit count went from %d to %d", firstHits, signinHits)
+	}
+}
+
+func TestBrowserBackend_LoginReusesWarmBrowserProfileSession(t *testing.T) {
+	opts := newBrowserTestOpts(t)
+
+	var signinHits, authHits, domainsHits int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/domains", func(w http.ResponseWriter, r *http.Request) {
+		domainsHits++
+		if _, err := r.Cookie("__uzma"); err != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"succeeded":false,"error_code":"login"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"succeeded": true, "domains": []map[string]any{}})
+	})
+	mux.HandleFunc("/signin", func(w http.ResponseWriter, r *http.Request) {
+		signinHits++
+		http.SetCookie(w, &http.Cookie{Name: "__uzma", Value: "fresh-from-signin", Path: "/"})
+		_, _ = w.Write([]byte(`<html><body>signin</body></html>`))
+	})
+	mux.HandleFunc("/signin/auth.json", func(w http.ResponseWriter, r *http.Request) {
+		authHits++
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"succeeded": true, "status": "completed"})
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	seedBrowserProfileCookie(t, opts, srv.URL, "__uzma", "warm-session")
+
+	creds := Credentials{Username: "alice", Password: "pw"}
+	c := newBrowserClient(t, opts, srv.URL, creds)
+	t.Cleanup(func() { _ = c.backend.(interface{ Close() error }).Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := c.Login(ctx); err != nil {
+		t.Fatalf("Login with warm profile: %v", err)
+	}
+	if signinHits != 0 || authHits != 0 {
+		t.Fatalf("warm profile should skip credential login; signinHits=%d authHits=%d", signinHits, authHits)
+	}
+	if domainsHits == 0 {
+		t.Fatal("warm profile login did not probe /api/domains")
+	}
+	c.mu.Lock()
+	loggedAt := c.loggedAt
+	c.mu.Unlock()
+	if loggedAt.IsZero() {
+		t.Fatal("loggedAt not set after warm profile reuse")
+	}
+}
+
+func TestBrowserBackend_LoginFallsBackWhenWarmProfileUnauthenticated(t *testing.T) {
+	opts := newBrowserTestOpts(t)
+
+	var signinHits, authHits, domainsHits int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/domains", func(w http.ResponseWriter, r *http.Request) {
+		domainsHits++
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"succeeded":false,"error_code":"login"}`))
+	})
+	mux.HandleFunc("/signin", func(w http.ResponseWriter, r *http.Request) {
+		signinHits++
+		http.SetCookie(w, &http.Cookie{Name: "__uzma", Value: "fresh-from-signin", Path: "/"})
+		_, _ = w.Write([]byte(`<html><body>signin</body></html>`))
+	})
+	mux.HandleFunc("/signin/auth.json", func(w http.ResponseWriter, r *http.Request) {
+		authHits++
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"succeeded": true, "status": "completed"})
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	creds := Credentials{Username: "alice", Password: "pw"}
+	c := newBrowserClient(t, opts, srv.URL, creds)
+	t.Cleanup(func() { _ = c.backend.(interface{ Close() error }).Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := c.Login(ctx); err != nil {
+		t.Fatalf("Login after stale warm profile probe: %v", err)
+	}
+	if domainsHits == 0 {
+		t.Fatal("stale profile login did not probe /api/domains before fallback")
+	}
+	if signinHits == 0 || authHits == 0 {
+		t.Fatalf("stale profile should fall back to credential login; signinHits=%d authHits=%d", signinHits, authHits)
+	}
+}
+
+func seedBrowserProfileCookie(t *testing.T, opts BrowserOptions, baseURL, name, value string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	browser, launcher, err := launchBrowserWithHandles(ctx, opts)
+	if err != nil {
+		t.Fatalf("launch browser to seed profile cookie: %v", err)
+	}
+	defer launcher.Kill()
+	defer func() { _ = browser.Close() }()
+
+	if err := browser.Context(ctx).SetCookies([]*proto.NetworkCookieParam{{
+		Name:    name,
+		Value:   value,
+		URL:     baseURL,
+		Path:    "/",
+		Expires: proto.TimeSinceEpoch(time.Now().Add(2 * time.Hour).Unix()),
+	}}); err != nil {
+		t.Fatalf("seed browser profile cookie: %v", err)
 	}
 }
 
