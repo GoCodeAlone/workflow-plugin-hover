@@ -464,16 +464,17 @@ func (b *browserBackend) SetNameservers(ctx context.Context, c *Client, domainNa
 		return fmt.Errorf("hover browser SetNameservers: eval CSRF: %w", err)
 	}
 	csrf := obj.Value.String()
-	if csrf == "" {
-		return fmt.Errorf("hover browser SetNameservers: CSRF meta tag not found at %s", cpURL)
-	}
 
 	// Build PUT endpoint + payload (same as HTTP backend).
 	putEndpoint := fmt.Sprintf("%s/api/control_panel/domains/domain-%s", base, url.PathEscape(domainName))
 	payload := map[string]any{"field": "nameservers", "value": ns}
+	headers := map[string]string{}
+	if csrf != "" {
+		headers["X-CSRF-Token"] = csrf
+	}
 
 	rawBody, code, err := browserFetchWithHeaders(ctx, page, "PUT", putEndpoint,
-		"application/json", payload, map[string]string{"X-CSRF-Token": csrf})
+		"application/json", payload, headers)
 	if err != nil {
 		return fmt.Errorf("hover browser SetNameservers %q: fetch: %w", domainName, err)
 	}

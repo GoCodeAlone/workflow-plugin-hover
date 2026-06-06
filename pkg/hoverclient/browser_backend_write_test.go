@@ -34,6 +34,10 @@ import (
 // The recordedReqs map (method → recorded request info) is populated by the
 // handlers. The control_panel page returns a fixed CSRF token.
 func fakeWriteMux(t *testing.T) (*http.ServeMux, *writeRequestLog) {
+	return fakeWriteMuxWithControlPanelHTML(t, `<html><head><meta name="csrf-token" content="test-csrf-abc"></head></html>`)
+}
+
+func fakeWriteMuxWithControlPanelHTML(t *testing.T, controlPanelHTML string) (*http.ServeMux, *writeRequestLog) {
 	t.Helper()
 	log := &writeRequestLog{}
 	mux := http.NewServeMux()
@@ -76,7 +80,7 @@ func fakeWriteMux(t *testing.T) (*http.ServeMux, *writeRequestLog) {
 
 	// SetNameservers CSRF page: GET /control_panel/domain/<name>
 	mux.HandleFunc("/control_panel/", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`<html><head><meta name="csrf-token" content="test-csrf-abc"></head></html>`))
+		_, _ = w.Write([]byte(controlPanelHTML))
 	})
 
 	// SetNameservers PUT: /api/control_panel/domains/<domain>
@@ -344,6 +348,30 @@ func TestBrowserBackend_SetNameserversInBrowser(t *testing.T) {
 	}
 	if valSlice[0] != "ns1.example.com" || valSlice[1] != "ns2.example.com" {
 		t.Errorf("value = %v, want [ns1.example.com ns2.example.com]", valSlice)
+	}
+}
+
+func TestBrowserBackend_SetNameserversInBrowserWithoutCSRFMeta(t *testing.T) {
+	mux, log := fakeWriteMuxWithControlPanelHTML(t, `<html><head><title>domain</title></head><body>no csrf meta</body></html>`)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c := newWriteBrowserClient(t, srv)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	ns := []string{"ns1.example.com", "ns2.example.com"}
+	if err := c.SetNameservers(ctx, "example.com", ns); err != nil {
+		t.Fatalf("SetNameservers without CSRF meta: %v", err)
+	}
+
+	req, ok := log.firstMatching(http.MethodPut, "/api/control_panel/domains/domain-example.com")
+	if !ok {
+		t.Fatal("PUT /api/control_panel/domains/domain-example.com not observed by server")
+	}
+	if got := req.Header.Get("X-CSRF-Token"); got != "" {
+		t.Errorf("X-CSRF-Token = %q, want empty when control panel has no CSRF meta", got)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLiveBrowserLoginAndHTTPReuseProbe(t *testing.T) {
@@ -40,13 +41,16 @@ func TestLiveSetNameserversNoop(t *testing.T) {
 		t.Fatal("set HOVER_LIVE_NS_EXPECTED to the current nameservers, comma-separated")
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
 	creds := liveCredentialsFromEnv(t)
 	opts := liveBrowserOptionsFromEnv(t)
 	c, err := NewClientWithOptions(creds, nil, ClientOptions{Browser: opts})
 	if err != nil {
 		t.Fatalf("NewClientWithOptions: %v", err)
 	}
+	t.Cleanup(func() { _ = c.backend.Close() })
 
 	domains, err := c.ListDomains(ctx)
 	if err != nil {
