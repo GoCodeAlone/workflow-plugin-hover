@@ -83,12 +83,15 @@ func (b *browserBackend) signinHost() string {
 // ---------------------------------------------------------------------------
 
 // Login drives Chrome to:
-//  1. Navigate to /signin (Imperva JS runs, clearance cookies are minted).
-//  2. Wait for Imperva clearance cookies.
-//  3. Submit credentials via in-page fetch (same-origin XHR path).
-//  4. Handle TOTP 2FA if required.
-//  5. Copy all browser cookies into c.http.Jar for the hybrid HTTP reads.
-//  6. Set c.loggedAt.
+//  1. Launch Chrome with the configured persistent profile.
+//  2. Copy existing profile cookies into c.http.Jar and probe /api/domains.
+//  3. If the probe is authenticated, reuse the warm session without login.
+//  4. Otherwise navigate to /signin (Imperva JS runs, clearance cookies are minted).
+//  5. Wait for Imperva clearance cookies.
+//  6. Submit credentials via in-page fetch (same-origin XHR path).
+//  7. Handle TOTP 2FA if required.
+//  8. Copy all browser cookies into c.http.Jar for the hybrid HTTP reads.
+//  9. Set c.loggedAt.
 func (b *browserBackend) Login(ctx context.Context, c *Client) error {
 	c.mu.Lock()
 	alreadyFresh := !c.loggedAt.IsZero() && time.Since(c.loggedAt) < sessionStaleAfter
@@ -130,6 +133,18 @@ func (b *browserBackend) Login(ctx context.Context, c *Client) error {
 	// Keep handles for Close() and Task 4 page reuse.
 	b.browser = browser
 	b.launcher = l
+
+	if err := b.handOffCookies(browser, c); err != nil {
+		return fmt.Errorf("hover browser login: warm cookie handoff: %w", err)
+	}
+	if ok, err := b.probeExistingSession(ctx, c); err != nil {
+		return fmt.Errorf("hover browser login: warm session probe: %w", err)
+	} else if ok {
+		c.mu.Lock()
+		c.loggedAt = time.Now()
+		c.mu.Unlock()
+		return nil
+	}
 
 	page, err := browser.Page(proto.TargetCreateTarget{URL: "about:blank"})
 	if err != nil {
@@ -279,6 +294,31 @@ func (b *browserBackend) syncJarCookiesToBrowser(ctx context.Context, c *Client)
 		return fmt.Errorf("set browser cookies from jar: %w", err)
 	}
 	return nil
+}
+
+func (b *browserBackend) probeExistingSession(ctx context.Context, c *Client) (bool, error) {
+	endpoint := b.signinHost() + "/api/domains"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", c.UserAgent)
+	resp, err := c.do(req)
+	if err != nil {
+		return false, nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, nil
+	}
+	var body struct {
+		Succeeded bool `json:"succeeded"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return false, nil
+	}
+	return body.Succeeded, nil
 }
 
 // ---------------------------------------------------------------------------

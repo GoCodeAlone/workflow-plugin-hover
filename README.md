@@ -29,8 +29,11 @@ require an in-page flow run in the same browser instance.
    `UpdateRecord`, `DeleteRecord`) run in the browser where the full Imperva
    context is live.
 
-The session is considered stale after 1 hour; a fresh browser login fires
-automatically on the next operation.
+The in-process session is considered stale after 1 hour. Across process or CI
+runs, the plugin first checks whether the persistent browser profile is still
+authenticated by copying profile cookies into the Go client and probing
+`/api/domains`; a fresh browser login fires only when that probe is not
+authenticated.
 
 ## Chrome acquisition
 
@@ -108,8 +111,10 @@ ${XDG_STATE_HOME:-$HOME/.local/state}/wfctl/plugins/hover/browser-profile
 ```
 
 Override via `browser_profile_dir` or `HOVER_BROWSER_PROFILE_DIR`. A warm
-profile skips re-authentication against Imperva on subsequent runs and allows
-the plugin to work even after a TOTP secret is no longer available.
+profile is probed before credential login; when Hover still accepts the cached
+session, the plugin skips the password/TOTP flow on subsequent runs. This
+reduces repeated login traffic and allows the plugin to work even after a TOTP
+secret is no longer available.
 
 ## Required secrets
 
