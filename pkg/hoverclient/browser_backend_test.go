@@ -590,6 +590,34 @@ func TestBrowserBackend_ProbeExistingSessionReturnsContextCancellation(t *testin
 	}
 }
 
+func TestBrowserBackend_ProbeExistingSessionReturnsContextCancellationFromBodyRead(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	bb := newBrowserBackend(BrowserOptions{})
+	bb.overrideHost = "https://example.test"
+	c := &Client{
+		http: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       &cancelAfterPartialJSONBody{cancel: cancel},
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}),
+		},
+		UserAgent: defaultUserAgent,
+	}
+
+	ok, err := bb.probeExistingSession(ctx, c)
+	if ok {
+		t.Fatal("probeExistingSession unexpectedly reused a canceled session")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("probeExistingSession error = %v, want context.Canceled", err)
+	}
+}
+
 func TestBrowserBackend_LoginFallsBackWhenWarmProfileUnauthenticated(t *testing.T) {
 	opts := newBrowserTestOpts(t)
 
@@ -630,6 +658,30 @@ func TestBrowserBackend_LoginFallsBackWhenWarmProfileUnauthenticated(t *testing.
 	if gotSignin, gotAuth := signinHits.Load(), authHits.Load(); gotSignin == 0 || gotAuth == 0 {
 		t.Fatalf("stale profile should fall back to credential login; signinHits=%d authHits=%d", gotSignin, gotAuth)
 	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type cancelAfterPartialJSONBody struct {
+	cancel context.CancelFunc
+	sent   bool
+}
+
+func (b *cancelAfterPartialJSONBody) Read(p []byte) (int, error) {
+	if !b.sent {
+		b.sent = true
+		return copy(p, `{"succeeded":`), nil
+	}
+	b.cancel()
+	return 0, context.Canceled
+}
+
+func (b *cancelAfterPartialJSONBody) Close() error {
+	return nil
 }
 
 func seedBrowserProfileCookie(t *testing.T, opts BrowserOptions, baseURL, name, value string) {
