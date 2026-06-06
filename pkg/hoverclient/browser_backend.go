@@ -247,6 +247,40 @@ func (b *browserBackend) handOffCookies(browser *rod.Browser, c *Client) error {
 	return nil
 }
 
+func (b *browserBackend) syncJarCookiesToBrowser(ctx context.Context, c *Client) error {
+	if b.browser == nil || c.http.Jar == nil {
+		return nil
+	}
+	targetURL, err := url.Parse(b.signinHost())
+	if err != nil {
+		return fmt.Errorf("parse host URL %q: %w", b.signinHost(), err)
+	}
+	cookies := c.http.Jar.Cookies(targetURL)
+	if len(cookies) == 0 {
+		return nil
+	}
+	cookieURL := targetURL.String()
+	var params []*proto.NetworkCookieParam
+	for _, cookie := range cookies {
+		path := cookie.Path
+		if path == "" {
+			path = "/"
+		}
+		params = append(params, &proto.NetworkCookieParam{
+			Name:     cookie.Name,
+			Value:    cookie.Value,
+			URL:      cookieURL,
+			Path:     path,
+			Secure:   cookie.Secure || targetURL.Scheme == "https",
+			HTTPOnly: cookie.HttpOnly,
+		})
+	}
+	if err := b.browser.Context(ctx).SetCookies(params); err != nil {
+		return fmt.Errorf("set browser cookies from jar: %w", err)
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // READ operations — delegate to the HTTP backend after ensuring login.
 // ---------------------------------------------------------------------------
@@ -438,6 +472,9 @@ func (b *browserBackend) SetNameservers(ctx context.Context, c *Client, domainNa
 		return fmt.Errorf("hover browser SetNameservers: browser not initialised (Login must succeed before write operations)")
 	}
 	base := b.signinHost()
+	if err := b.syncJarCookiesToBrowser(ctx, c); err != nil {
+		return fmt.Errorf("hover browser SetNameservers: cookie sync: %w", err)
+	}
 
 	// Open a page and navigate to the control_panel domain page to read the CSRF.
 	// Use browser.Context(ctx) to override the browser's stored (login-timeout)
