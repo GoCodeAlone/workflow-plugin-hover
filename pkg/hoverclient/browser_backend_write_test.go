@@ -34,6 +34,10 @@ import (
 // The recordedReqs map (method → recorded request info) is populated by the
 // handlers. The control_panel page returns a fixed CSRF token.
 func fakeWriteMux(t *testing.T) (*http.ServeMux, *writeRequestLog) {
+	return fakeWriteMuxWithControlPanelHTML(t, `<html><head><meta name="csrf-token" content="test-csrf-abc"></head></html>`)
+}
+
+func fakeWriteMuxWithControlPanelHTML(t *testing.T, controlPanelHTML string) (*http.ServeMux, *writeRequestLog) {
 	t.Helper()
 	log := &writeRequestLog{}
 	mux := http.NewServeMux()
@@ -76,11 +80,41 @@ func fakeWriteMux(t *testing.T) (*http.ServeMux, *writeRequestLog) {
 
 	// SetNameservers CSRF page: GET /control_panel/domain/<name>
 	mux.HandleFunc("/control_panel/", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`<html><head><meta name="csrf-token" content="test-csrf-abc"></head></html>`))
+		_, _ = w.Write([]byte(controlPanelHTML))
 	})
 
 	// SetNameservers PUT: /api/control_panel/domains/<domain>
 	mux.HandleFunc("/api/control_panel/", func(w http.ResponseWriter, r *http.Request) {
+		log.record(r)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	})
+
+	return mux, log
+}
+
+func fakeWriteMuxRequiringCookie(t *testing.T, controlPanelHTML, cookieName string) (*http.ServeMux, *writeRequestLog) {
+	t.Helper()
+	log := &writeRequestLog{}
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/signin", func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "fake-session", Path: "/", HttpOnly: true})
+		_, _ = w.Write([]byte(`<html><body>signin</body></html>`))
+	})
+	mux.HandleFunc("/signin/auth.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"succeeded": true, "status": "completed"})
+	})
+	mux.HandleFunc("/control_panel/", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(controlPanelHTML))
+	})
+	mux.HandleFunc("/api/control_panel/", func(w http.ResponseWriter, r *http.Request) {
+		if _, err := r.Cookie(cookieName); err != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"succeeded":false,"error_code":"login","error":"You must login first"}`))
+			return
+		}
 		log.record(r)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{}`))
@@ -344,6 +378,58 @@ func TestBrowserBackend_SetNameserversInBrowser(t *testing.T) {
 	}
 	if valSlice[0] != "ns1.example.com" || valSlice[1] != "ns2.example.com" {
 		t.Errorf("value = %v, want [ns1.example.com ns2.example.com]", valSlice)
+	}
+}
+
+func TestBrowserBackend_SetNameserversInBrowserWithoutCSRFMeta(t *testing.T) {
+	mux, log := fakeWriteMuxWithControlPanelHTML(t, `<html><head><title>domain</title></head><body>no csrf meta</body></html>`)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c := newWriteBrowserClient(t, srv)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	ns := []string{"ns1.example.com", "ns2.example.com"}
+	if err := c.SetNameservers(ctx, "example.com", ns); err != nil {
+		t.Fatalf("SetNameservers without CSRF meta: %v", err)
+	}
+
+	req, ok := log.firstMatching(http.MethodPut, "/api/control_panel/domains/domain-example.com")
+	if !ok {
+		t.Fatal("PUT /api/control_panel/domains/domain-example.com not observed by server")
+	}
+	if got := req.Header.Get("X-CSRF-Token"); got != "" {
+		t.Errorf("X-CSRF-Token = %q, want empty when control panel has no CSRF meta", got)
+	}
+}
+
+func TestBrowserBackend_SetNameserversSyncsJarCookiesToBrowser(t *testing.T) {
+	const sessionCookie = "__uzma"
+	mux, log := fakeWriteMuxRequiringCookie(t, `<html><head><title>domain</title></head><body>no csrf meta</body></html>`, sessionCookie)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c := newWriteBrowserClient(t, srv)
+	bb := c.backend.(*browserBackend)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := bb.browser.Context(ctx).SetCookies(nil); err != nil {
+		t.Fatalf("clear browser cookies: %v", err)
+	}
+
+	ns := []string{"ns1.example.com", "ns2.example.com"}
+	if err := c.SetNameservers(ctx, "example.com", ns); err != nil {
+		t.Fatalf("SetNameservers after browser cookie loss: %v", err)
+	}
+
+	req, ok := log.firstMatching(http.MethodPut, "/api/control_panel/domains/domain-example.com")
+	if !ok {
+		t.Fatal("PUT /api/control_panel/domains/domain-example.com not observed by server")
+	}
+	if _, err := (&http.Request{Header: req.Header}).Cookie(sessionCookie); err != nil {
+		t.Fatalf("PUT missing synced %s cookie: %v", sessionCookie, err)
 	}
 }
 
