@@ -306,16 +306,31 @@ func (b *browserBackend) probeExistingSession(ctx context.Context, c *Client) (b
 	req.Header.Set("User-Agent", c.UserAgent)
 	resp, err := c.do(req)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return false, err
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false, ctxErr
+		}
 		return false, nil
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false, ctxErr
+		}
 		return false, nil
 	}
 	var body struct {
 		Succeeded bool `json:"succeeded"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return false, err
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false, ctxErr
+		}
 		return false, nil
 	}
 	return body.Succeeded, nil
