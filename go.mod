@@ -1,6 +1,6 @@
 module github.com/GoCodeAlone/workflow-plugin-hover
 
-go 1.26.3
+go 1.26.4
 
 require (
 	github.com/GoCodeAlone/rod v0.116.3
