@@ -116,15 +116,25 @@ session, the plugin skips the password/TOTP flow on subsequent runs. This
 reduces repeated login traffic and allows the plugin to work even after a TOTP
 secret is no longer available.
 
-## Required secrets
+## Required setup values
 
 | Name | Sensitive | Purpose |
 |------|-----------|---------|
-| `HOVER_USERNAME` | no | Hover account login (email) |
+| `HOVER_USERNAME` | no | Hover account login email; stored as provider configuration/variable |
 | `HOVER_PASSWORD` | **yes** | Hover account password |
 | `HOVER_TOTP_SECRET` | **yes** | Base32 TOTP seed (required when account has authenticator 2FA) |
 
+Manifest-backed setup configures both secret values and non-secret
+`HOVER_USERNAME` in one flow when the plugin is installed:
+
 ```sh
+wfctl secrets setup --manifest wfctl.yaml
+```
+
+Without a manifest, use the plugin-only variable and secret setup commands:
+
+```sh
+wfctl vars setup --plugin workflow-plugin-hover
 wfctl secrets setup --plugin workflow-plugin-hover
 ```
 

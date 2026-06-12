@@ -30,12 +30,6 @@
   },
   "required_secrets": [
     {
-      "name": "HOVER_USERNAME",
-      "sensitive": false,
-      "description": "Hover account username",
-      "prompt": "Hover username"
-    },
-    {
       "name": "HOVER_PASSWORD",
       "sensitive": true,
       "description": "Hover account password",
@@ -48,52 +42,93 @@
       "prompt": "Hover TOTP seed (base32, 16+ chars)"
     }
   ],
-    "secret_targets": [
-      {
-        "provider": "github",
-        "scopes": [
-          "repo",
-          "env",
-          "org"
-        ],
-        "description": "Stored as GitHub Actions secrets when workflows run on GitHub."
-      },
-      {
-        "provider": "gitlab",
-        "scopes": [
-          "project",
-          "group",
-          "env"
-        ],
-        "description": "Stored as GitLab CI/CD variables when workflows run on GitLab."
-      },
-      {
-        "provider": "vault",
-        "scopes": [
-          "mount"
-        ],
-        "description": "Stored in Vault for application/runtime retrieval."
-      },
-      {
-        "provider": "file",
-        "scopes": [
-          "directory"
-        ],
-        "description": "Stored in a local file-backed secret store."
-      },
-      {
-        "provider": "keychain",
-        "scopes": [
-          "service"
-        ],
-        "description": "Stored in the local OS keychain."
-      },
-      {
-        "provider": "env",
-        "scopes": [
-          "process"
-        ],
-        "description": "Provided by the local process environment."
-      }
-    ]
+  "secret_targets": [
+    {
+      "provider": "github",
+      "scopes": [
+        "repo",
+        "env",
+        "org"
+      ],
+      "description": "Stored as GitHub Actions secrets when workflows run on GitHub."
+    },
+    {
+      "provider": "gitlab",
+      "scopes": [
+        "project",
+        "group"
+      ],
+      "description": "Stored as GitLab CI/CD variables when workflows run on GitLab; variables may also be narrowed with GitLab's separate environment_scope field."
+    },
+    {
+      "provider": "vault",
+      "scopes": [
+        "mount"
+      ],
+      "description": "Stored in Vault for application/runtime retrieval."
+    },
+    {
+      "provider": "file",
+      "scopes": [
+        "directory"
+      ],
+      "description": "Stored in a local file-backed secret store."
+    },
+    {
+      "provider": "keychain",
+      "scopes": [
+        "service"
+      ],
+      "description": "Stored in the local OS keychain."
+    },
+    {
+      "provider": "env",
+      "scopes": [
+        "process"
+      ],
+      "description": "Provided by the local process environment."
+    }
+  ],
+  "required_config": [
+    {
+      "name": "HOVER_USERNAME",
+      "key": "username",
+      "sensitive": false,
+      "description": "Hover account username or login email. This is non-secret provider configuration.",
+      "prompt": "Hover username"
+    }
+  ],
+  "config_targets": [
+    {
+      "provider": "github",
+      "scopes": [
+        "repo",
+        "env",
+        "org"
+      ],
+      "description": "Stored as GitHub Actions variables when workflows run on GitHub."
+    },
+    {
+      "provider": "gitlab",
+      "scopes": [
+        "project",
+        "group"
+      ],
+      "description": "Stored as GitLab CI/CD variables when workflows run on GitLab; variables may also be narrowed with GitLab environment_scope."
+    },
+    {
+      "provider": "file",
+      "scopes": [
+        "directory"
+      ],
+      "description": "Stored in a local dotenv/config file for local workflows."
+    },
+    {
+      "provider": "env",
+      "scopes": [
+        "process"
+      ],
+      "description": "Provided by the local process environment."
+    }
+  ]
 }
