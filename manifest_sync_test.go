@@ -45,8 +45,8 @@ func assertIaCProviderCapability(t *testing.T, manifest pluginManifest, name str
 	if !slices.Equal(manifest.Capabilities.ResourceTypes, resourceTypes) {
 		t.Fatalf("capabilities.resourceTypes = %#v, want %#v", manifest.Capabilities.ResourceTypes, resourceTypes)
 	}
-	if manifest.IaCProvider.ComputePlanVersion == "" {
-		t.Fatal("iacProvider.computePlanVersion must be declared")
+	if manifest.IaCProvider.ComputePlanVersion != "v2" {
+		t.Fatalf("iacProvider.computePlanVersion = %q, want %q", manifest.IaCProvider.ComputePlanVersion, "v2")
 	}
 }
 
