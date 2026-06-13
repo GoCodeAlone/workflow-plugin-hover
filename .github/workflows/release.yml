@@ -25,33 +25,10 @@ jobs:
             exit 1
           fi
           git config --global url."https://x-access-token:${RELEASES_TOKEN}@github.com/GoCodeAlone/".insteadOf "https://github.com/GoCodeAlone/"
-      - name: Install wfctl v0.78.0
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WFCTL_VERSION: v0.78.0
-        run: |
-          set -euo pipefail
-          runner_arch=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-          asset="wfctl-linux-${runner_arch}"
-          download_dir="$(mktemp -d)"
-          case "${asset}" in
-            wfctl-linux-amd64) expected_sha="63ac0957274e702930045c9c49955ab2a80b2ee9660da04d4fb4a45c8217f7d2" ;;
-            wfctl-linux-arm64) expected_sha="47a7d380837e404e00930b2a4bc504d583bf606520bc58c29dc984d21e704929" ;;
-            *) echo "::error::unsupported wfctl asset ${asset}"; exit 1 ;;
-          esac
-          gh release download "${WFCTL_VERSION}" \
-            --repo GoCodeAlone/workflow \
-            --pattern "${asset}" \
-            --dir "${download_dir}"
-          actual_sha="$(sha256sum "${download_dir}/${asset}" | awk '{print $1}')"
-          if [ "${actual_sha}" != "${expected_sha}" ]; then
-            echo "::error::wfctl checksum mismatch for ${asset}: expected ${expected_sha}, got ${actual_sha}"
-            exit 1
-          fi
-          mkdir -p "${RUNNER_TEMP}/wfctl-bin"
-          install -m 0755 "${download_dir}/${asset}" "${RUNNER_TEMP}/wfctl-bin/wfctl"
+      - name: Setup wfctl
+        uses: GoCodeAlone/setup-wfctl@bcd880980f5bbe8d192d0c20ff6279d25331f956 # v1
       - name: Validate plugin contract for publish (pre-build)
-        run: "${{ runner.temp }}/wfctl-bin/wfctl plugin validate-contract --for-publish --tag ${{ github.ref_name }} ."
+        run: wfctl plugin validate-contract --for-publish --tag ${{ github.ref_name }} .
       - uses: goreleaser/goreleaser-action@5daf1e915a5f0af01ddbcd89a43b8061ff4f1a89 # v7.2.2
         with:
           distribution: goreleaser
@@ -72,10 +49,10 @@ jobs:
             exit 0
           fi
           chmod +x -- "$BIN"
-          "${{ runner.temp }}/wfctl-bin/wfctl" plugin verify-capabilities --binary "$BIN" .release
+          wfctl plugin verify-capabilities --binary "$BIN" .release
       - name: Verify shipped plugin.json carries tag (post-build)
         run: |
-          "${{ runner.temp }}/wfctl-bin/wfctl" plugin validate-contract --for-publish --tag "${{ github.ref_name }}" --release-dir .release .
+          wfctl plugin validate-contract --for-publish --tag "${{ github.ref_name }}" --release-dir .release .
       - name: Unset credentialed git config
         if: always()
         env:
