@@ -26,7 +26,17 @@
     "resourceTypes": [
       "infra.dns",
       "infra.dns_delegation"
-    ]
+    ],
+    "iacProvider": {
+      "name": "hover",
+      "resourceTypes": [
+        "infra.dns",
+        "infra.dns_delegation"
+      ]
+    }
+  },
+  "iacProvider": {
+    "computePlanVersion": "v2"
   },
   "required_secrets": [
     {
