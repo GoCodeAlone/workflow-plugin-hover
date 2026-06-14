@@ -411,6 +411,69 @@ func TestBrowserBackend_LoginRetriesSignin429(t *testing.T) {
 	}
 }
 
+func TestBrowserBackend_LoginThrottlingWritesProfileCooldown(t *testing.T) {
+	opts := newBrowserTestOpts(t)
+
+	oldMaxRetries := maxRetries
+	maxRetries = 0
+	t.Cleanup(func() { maxRetries = oldMaxRetries })
+
+	var authHits atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/domains", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"succeeded":false,"error_code":"login","error":"You must login first"}`))
+	})
+	mux.HandleFunc("/signin", func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "__uzma", Value: "fake-clearance", Path: "/"})
+		_, _ = w.Write([]byte(`<html><body>signin</body></html>`))
+	})
+	mux.HandleFunc("/signin/auth.json", func(w http.ResponseWriter, r *http.Request) {
+		authHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]any{"succeeded": false, "error": "rate limited"})
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	creds := Credentials{Username: "alice", Password: "pw"}
+	first := newBrowserClient(t, opts, srv.URL, creds)
+	t.Cleanup(func() { _ = first.backend.(interface{ Close() error }).Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	err := first.Login(ctx)
+	if err == nil {
+		t.Fatal("expected first Login to fail on signin throttle")
+	}
+	if !errors.Is(err, ErrBotChallenge) {
+		t.Fatalf("first Login error = %v, want ErrBotChallenge", err)
+	}
+	if got := authHits.Load(); got != 1 {
+		t.Fatalf("auth hits after first Login = %d, want 1", got)
+	}
+	_ = first.backend.(interface{ Close() error }).Close()
+
+	second := newBrowserClient(t, opts, srv.URL, creds)
+	t.Cleanup(func() { _ = second.backend.(interface{ Close() error }).Close() })
+	err = second.Login(ctx)
+	if err == nil {
+		t.Fatal("expected second Login to fail fast on cached signin cooldown")
+	}
+	if !errors.Is(err, ErrBotChallenge) {
+		t.Fatalf("second Login error = %v, want ErrBotChallenge", err)
+	}
+	if !strings.Contains(err.Error(), "retry after") {
+		t.Fatalf("second Login error = %v, want retry-after cooldown guidance", err)
+	}
+	if got := authHits.Load(); got != 1 {
+		t.Fatalf("auth hits after second Login = %d, want still 1; cooldown should prevent another credential post", got)
+	}
+}
+
 func TestBrowserSigninRetryableStatusSet(t *testing.T) {
 	retryable := []int{
 		http.StatusTooManyRequests,

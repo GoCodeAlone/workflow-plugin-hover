@@ -188,12 +188,13 @@ func isClearanceCookie(name string) bool {
 }
 
 type browserSigninResult struct {
-	OK        bool   `json:"ok"`
-	HTTPCode  int    `json:"httpCode"`
-	Succeeded *bool  `json:"succeeded"`
-	Status    string `json:"status"`
-	Error     string `json:"error"`
-	Raw       string `json:"raw"`
+	OK            bool   `json:"ok"`
+	HTTPCode      int    `json:"httpCode"`
+	RetryableSeen bool   `json:"-"`
+	Succeeded     *bool  `json:"succeeded"`
+	Status        string `json:"status"`
+	Error         string `json:"error"`
+	Raw           string `json:"raw"`
 }
 
 func submitBrowserSignin(ctx context.Context, page *rod.Page, creds Credentials) error {
@@ -219,6 +220,9 @@ func submitBrowserSignin(ctx context.Context, page *rod.Page, creds Credentials)
 		}
 	}
 	if !result.OK {
+		if result.RetryableSeen {
+			return fmt.Errorf("%w: HTTP %d: %s", ErrSigninThrottled, result.HTTPCode, summarizeSigninRaw(result.Raw))
+		}
 		if result.Error != "" {
 			return fmt.Errorf("hover browser signin: HTTP %d: %s", result.HTTPCode, result.Error)
 		}
@@ -239,11 +243,16 @@ func submitBrowserSignin(ctx context.Context, page *rod.Page, creds Credentials)
 func browserSigninFetchWithRetry(ctx context.Context, page *rod.Page, endpoint string, payload map[string]any) (browserSigninResult, error) {
 	var result browserSigninResult
 	var err error
+	retryableSeen := false
 	for attempt := 0; ; attempt++ {
 		result, err = browserSigninFetch(ctx, page, endpoint, payload)
 		if err != nil {
 			return browserSigninResult{}, err
 		}
+		if isRetryableBrowserSigninStatus(result.HTTPCode) {
+			retryableSeen = true
+		}
+		result.RetryableSeen = retryableSeen
 		if !isRetryableBrowserSigninStatus(result.HTTPCode) || attempt >= maxRetries {
 			return result, nil
 		}
