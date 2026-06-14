@@ -340,6 +340,47 @@ func TestBrowserBackend_LoginDetectsBotChallenge(t *testing.T) {
 	}
 }
 
+func TestBrowserBackend_LoginRetriesSignin429(t *testing.T) {
+	opts := newBrowserTestOpts(t)
+	var authHits atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/signin", func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "__uzma", Value: "fake", Path: "/"})
+		_, _ = w.Write([]byte(`<html><body>signin</body></html>`))
+	})
+	mux.HandleFunc("/signin/auth.json", func(w http.ResponseWriter, r *http.Request) {
+		hit := authHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if hit == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`<html><head><title>429 Too Many Requests</title></head><body>try later</body></html>`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"succeeded": true, "status": "completed"})
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	oldDelay := retryBaseDelay
+	retryBaseDelay = time.Millisecond
+	t.Cleanup(func() { retryBaseDelay = oldDelay })
+
+	creds := Credentials{Username: "alice", Password: "pw"}
+	c := newBrowserClient(t, opts, srv.URL, creds)
+	t.Cleanup(func() { _ = c.backend.(interface{ Close() error }).Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := c.Login(ctx); err != nil {
+		t.Fatalf("Login after retryable 429: %v", err)
+	}
+	if got := authHits.Load(); got != 2 {
+		t.Fatalf("auth hits = %d, want 2", got)
+	}
+}
+
 // --------------------------------------------------------------------------
 // TestBrowserBackend_ReadsDelegateToHTTP
 // --------------------------------------------------------------------------
