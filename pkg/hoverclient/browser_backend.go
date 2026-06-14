@@ -600,6 +600,9 @@ func (b *browserBackend) revalidateBrowserSession(ctx context.Context, c *Client
 	if !body.Succeeded {
 		return false, nil
 	}
+	if err := b.handOffCookies(b.browser.Context(ctx), c); err != nil {
+		return false, fmt.Errorf("cookie handoff: %w", err)
+	}
 	c.mu.Lock()
 	c.loggedAt = time.Now()
 	c.mu.Unlock()
