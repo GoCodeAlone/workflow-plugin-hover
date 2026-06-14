@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -41,6 +42,16 @@ var ErrChromeUnavailable = errors.New("hover: no Chrome binary found; install Ch
 // email-OTP or another non-TOTP second factor. Configure a TOTP authenticator
 // app on the account and supply the base32 seed as totp_secret.
 var ErrEmail2FARequired = errors.New("hover: account uses email/non-TOTP 2FA — configure an authenticator app (TOTP) on the account and supply totp_secret, or pre-trust this browser profile")
+
+// ErrSigninThrottled is returned internally when Hover starts rate-limiting
+// credential signin. Callers see it wrapped in ErrBotChallenge with an
+// operator-facing cooldown message.
+var ErrSigninThrottled = errors.New("hover: signin throttled")
+
+const (
+	signinThrottleCooldown = 30 * time.Minute
+	signinCooldownFile     = ".hover-signin-cooldown.json"
+)
 
 // ---------------------------------------------------------------------------
 // browserBackend
@@ -155,11 +166,15 @@ func (b *browserBackend) login(ctx context.Context, c *Client, allowWarmReuse bo
 		if ok, err := b.probeExistingSession(ctx, c); err != nil {
 			return fmt.Errorf("hover browser login: warm session probe: %w", err)
 		} else if ok {
+			_ = b.clearSigninCooldown()
 			c.mu.Lock()
 			c.loggedAt = time.Now()
 			c.mu.Unlock()
 			return nil
 		}
+	}
+	if err := b.checkSigninCooldown(time.Now()); err != nil {
+		return err
 	}
 
 	page, err := browser.Page(proto.TargetCreateTarget{URL: "about:blank"})
@@ -203,6 +218,9 @@ func (b *browserBackend) login(ctx context.Context, c *Client, allowWarmReuse bo
 	// Submit credentials via in-page fetch. The probe helper handles need_2fa
 	// detection and TOTP; we post-process its errors to surface typed variants.
 	if err := submitBrowserSignin(ctx, page, c.creds); err != nil {
+		if errors.Is(err, ErrSigninThrottled) {
+			_ = b.markSigninCooldown(time.Now(), err.Error())
+		}
 		return b.classifySigninError(err)
 	}
 
@@ -215,6 +233,7 @@ func (b *browserBackend) login(ctx context.Context, c *Client, allowWarmReuse bo
 	c.mu.Lock()
 	c.loggedAt = time.Now()
 	c.mu.Unlock()
+	_ = b.clearSigninCooldown()
 	return nil
 }
 
@@ -230,11 +249,80 @@ func (b *browserBackend) classifySigninError(err error) error {
 	if strings.Contains(msg, "no totp_secret") || strings.Contains(msg, "totp_secret was provided") {
 		return fmt.Errorf("%w: %v", ErrEmail2FARequired, err)
 	}
+	if errors.Is(err, ErrSigninThrottled) {
+		return fmt.Errorf("%w: Hover signin is throttled; cached profile cooldown is active for %s: %v", ErrBotChallenge, signinThrottleCooldown, err)
+	}
 	// HTTP 401/403/429 from auth endpoint → bot/rate challenge.
 	if strings.Contains(msg, "HTTP 401") || strings.Contains(msg, "HTTP 403") || strings.Contains(msg, "HTTP 429") {
 		return fmt.Errorf("%w: %v", ErrBotChallenge, err)
 	}
 	return err
+}
+
+type signinCooldownMarker struct {
+	Until  time.Time `json:"until"`
+	Reason string    `json:"reason,omitempty"`
+}
+
+func (b *browserBackend) signinCooldownPath() string {
+	if b.opts.ProfileDir == "" {
+		return ""
+	}
+	return filepath.Join(b.opts.ProfileDir, signinCooldownFile)
+}
+
+func (b *browserBackend) checkSigninCooldown(now time.Time) error {
+	path := b.signinCooldownPath()
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("hover browser login: read signin cooldown marker: %w", err)
+	}
+	var marker signinCooldownMarker
+	if err := json.Unmarshal(data, &marker); err != nil {
+		_ = os.Remove(path)
+		return nil
+	}
+	if marker.Until.IsZero() || !now.Before(marker.Until) {
+		_ = os.Remove(path)
+		return nil
+	}
+	return fmt.Errorf("%w: Hover signin was throttled recently; retry after %s or reuse a valid cached browser session", ErrBotChallenge, marker.Until.Format(time.RFC3339))
+}
+
+func (b *browserBackend) markSigninCooldown(now time.Time, reason string) error {
+	path := b.signinCooldownPath()
+	if path == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	marker := signinCooldownMarker{
+		Until:  now.Add(signinThrottleCooldown).UTC(),
+		Reason: reason,
+	}
+	data, err := json.Marshal(marker)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
+func (b *browserBackend) clearSigninCooldown() error {
+	path := b.signinCooldownPath()
+	if path == "" {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // launchBrowser launches Chrome and returns the browser + launcher handles.
