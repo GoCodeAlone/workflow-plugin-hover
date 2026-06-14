@@ -381,6 +381,32 @@ func TestBrowserBackend_LoginRetriesSignin429(t *testing.T) {
 	}
 }
 
+func TestBrowserSigninRetryableStatusSet(t *testing.T) {
+	retryable := []int{
+		http.StatusTooManyRequests,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout,
+	}
+	for _, code := range retryable {
+		if !isRetryableBrowserSigninStatus(code) {
+			t.Fatalf("status %d should be retryable", code)
+		}
+	}
+
+	notRetryable := []int{
+		http.StatusBadRequest,
+		http.StatusUnauthorized,
+		http.StatusForbidden,
+		http.StatusInternalServerError,
+	}
+	for _, code := range notRetryable {
+		if isRetryableBrowserSigninStatus(code) {
+			t.Fatalf("status %d should not be retryable", code)
+		}
+	}
+}
+
 // --------------------------------------------------------------------------
 // TestBrowserBackend_ReadsDelegateToHTTP
 // --------------------------------------------------------------------------
