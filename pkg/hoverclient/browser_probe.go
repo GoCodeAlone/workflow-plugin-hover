@@ -255,7 +255,10 @@ func browserSigninFetchWithRetry(ctx context.Context, page *rod.Page, endpoint s
 }
 
 func isRetryableBrowserSigninStatus(code int) bool {
-	return code == http.StatusTooManyRequests || code == http.StatusServiceUnavailable
+	return code == http.StatusTooManyRequests ||
+		code == http.StatusBadGateway ||
+		code == http.StatusServiceUnavailable ||
+		code == http.StatusGatewayTimeout
 }
 
 func summarizeSigninRaw(raw string) string {
