@@ -293,6 +293,36 @@ func TestBrowserBackend_LoginEmail2FAWithoutTOTP(t *testing.T) {
 	}
 }
 
+func TestBrowserBackend_LoginRejectsHTTP200SucceededFalse(t *testing.T) {
+	opts := newBrowserTestOpts(t)
+
+	auth := map[string]any{"succeeded": false, "error": "Invalid username or password."}
+	mux := fakeSigninMux(auth, nil)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	creds := Credentials{Username: "alice", Password: "pw"}
+	c := newBrowserClient(t, opts, srv.URL, creds)
+	t.Cleanup(func() { _ = c.backend.(interface{ Close() error }).Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Second)
+	defer cancel()
+
+	err := c.Login(ctx)
+	if err == nil {
+		t.Fatal("expected succeeded=false signin response to fail")
+	}
+	if !strings.Contains(err.Error(), "Invalid username or password") {
+		t.Fatalf("error = %v, want Hover signin error text", err)
+	}
+	c.mu.Lock()
+	loggedAt := c.loggedAt
+	c.mu.Unlock()
+	if !loggedAt.IsZero() {
+		t.Fatal("loggedAt set after failed signin")
+	}
+}
+
 // --------------------------------------------------------------------------
 // TestBrowserBackend_LoginDetectsBotChallenge
 // --------------------------------------------------------------------------
