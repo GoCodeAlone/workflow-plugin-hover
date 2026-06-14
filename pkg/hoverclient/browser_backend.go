@@ -93,11 +93,25 @@ func (b *browserBackend) signinHost() string {
 //  8. Copy all browser cookies into c.http.Jar for the hybrid HTTP reads.
 //  9. Set c.loggedAt.
 func (b *browserBackend) Login(ctx context.Context, c *Client) error {
+	return b.login(ctx, c, true)
+}
+
+func (b *browserBackend) forceLogin(ctx context.Context, c *Client) error {
 	c.mu.Lock()
-	alreadyFresh := !c.loggedAt.IsZero() && time.Since(c.loggedAt) < sessionStaleAfter
+	c.loggedAt = time.Time{}
 	c.mu.Unlock()
-	if alreadyFresh {
-		return nil
+	_ = b.Close()
+	return b.login(ctx, c, false)
+}
+
+func (b *browserBackend) login(ctx context.Context, c *Client, allowWarmReuse bool) error {
+	if allowWarmReuse {
+		c.mu.Lock()
+		alreadyFresh := !c.loggedAt.IsZero() && time.Since(c.loggedAt) < sessionStaleAfter
+		c.mu.Unlock()
+		if alreadyFresh {
+			return nil
+		}
 	}
 
 	if b.opts.Timeout > 0 {
@@ -137,13 +151,15 @@ func (b *browserBackend) Login(ctx context.Context, c *Client) error {
 	if err := b.handOffCookies(browser, c); err != nil {
 		return fmt.Errorf("hover browser login: warm cookie handoff: %w", err)
 	}
-	if ok, err := b.probeExistingSession(ctx, c); err != nil {
-		return fmt.Errorf("hover browser login: warm session probe: %w", err)
-	} else if ok {
-		c.mu.Lock()
-		c.loggedAt = time.Now()
-		c.mu.Unlock()
-		return nil
+	if allowWarmReuse {
+		if ok, err := b.probeExistingSession(ctx, c); err != nil {
+			return fmt.Errorf("hover browser login: warm session probe: %w", err)
+		} else if ok {
+			c.mu.Lock()
+			c.loggedAt = time.Now()
+			c.mu.Unlock()
+			return nil
+		}
 	}
 
 	page, err := browser.Page(proto.TargetCreateTarget{URL: "about:blank"})
@@ -523,12 +539,33 @@ func (b *browserBackend) SetNameservers(ctx context.Context, c *Client, domainNa
 	if err := b.ensureLoggedIn(ctx, c); err != nil {
 		return err
 	}
+	rawBody, code, err := b.setNameserversOnce(ctx, c, domainName, ns)
+	if err != nil {
+		return err
+	}
+	if isHoverLoginResponse(code, rawBody) {
+		fmt.Fprintf(os.Stderr, "hover browser SetNameservers %q: session rejected by Hover; refreshing login and retrying once\n", domainName)
+		if err := b.forceLogin(ctx, c); err != nil {
+			return fmt.Errorf("hover browser SetNameservers %q: refresh login after HTTP %d: %w", domainName, code, err)
+		}
+		rawBody, code, err = b.setNameserversOnce(ctx, c, domainName, ns)
+		if err != nil {
+			return err
+		}
+	}
+	if code >= 400 {
+		return fmt.Errorf("hover browser SetNameservers %q: HTTP %d: %s", domainName, code, strings.TrimSpace(rawBody))
+	}
+	return nil
+}
+
+func (b *browserBackend) setNameserversOnce(ctx context.Context, c *Client, domainName string, ns []string) (string, int, error) {
 	if b.browser == nil {
-		return fmt.Errorf("hover browser SetNameservers: browser not initialised (Login must succeed before write operations)")
+		return "", 0, fmt.Errorf("hover browser SetNameservers: browser not initialised (Login must succeed before write operations)")
 	}
 	base := b.signinHost()
 	if err := b.syncJarCookiesToBrowser(ctx, c); err != nil {
-		return fmt.Errorf("hover browser SetNameservers: cookie sync: %w", err)
+		return "", 0, fmt.Errorf("hover browser SetNameservers: cookie sync: %w", err)
 	}
 
 	// Open a page and navigate to the control_panel domain page to read the CSRF.
@@ -536,14 +573,14 @@ func (b *browserBackend) SetNameservers(ctx context.Context, c *Client, domainNa
 	// context so new page creation honours the caller's deadline.
 	page, err := b.browser.Context(ctx).Page(proto.TargetCreateTarget{URL: "about:blank"})
 	if err != nil {
-		return fmt.Errorf("hover browser SetNameservers: new page: %w", err)
+		return "", 0, fmt.Errorf("hover browser SetNameservers: new page: %w", err)
 	}
 	page = page.Context(ctx)
 	defer func() { _ = page.Close() }()
 
 	cpURL := fmt.Sprintf("%s/control_panel/domain/%s", base, url.PathEscape(domainName))
 	if err := page.Navigate(cpURL); err != nil {
-		return fmt.Errorf("hover browser SetNameservers: navigate control_panel: %w", err)
+		return "", 0, fmt.Errorf("hover browser SetNameservers: navigate control_panel: %w", err)
 	}
 	_ = page.WaitLoad()
 
@@ -553,7 +590,7 @@ func (b *browserBackend) SetNameservers(ctx context.Context, c *Client, domainNa
 		return m ? m.getAttribute('content') : '';
 	}`)
 	if err != nil {
-		return fmt.Errorf("hover browser SetNameservers: eval CSRF: %w", err)
+		return "", 0, fmt.Errorf("hover browser SetNameservers: eval CSRF: %w", err)
 	}
 	csrf := obj.Value.String()
 
@@ -568,12 +605,17 @@ func (b *browserBackend) SetNameservers(ctx context.Context, c *Client, domainNa
 	rawBody, code, err := browserFetchWithHeaders(ctx, page, "PUT", putEndpoint,
 		"application/json", payload, headers)
 	if err != nil {
-		return fmt.Errorf("hover browser SetNameservers %q: fetch: %w", domainName, err)
+		return "", 0, fmt.Errorf("hover browser SetNameservers %q: fetch: %w", domainName, err)
 	}
-	if code >= 400 {
-		return fmt.Errorf("hover browser SetNameservers %q: HTTP %d: %s", domainName, code, strings.TrimSpace(rawBody))
-	}
-	return nil
+	return rawBody, code, nil
+}
+
+func isHoverLoginResponse(code int, rawBody string) bool {
+	body := strings.ToLower(rawBody)
+	return code == http.StatusUnauthorized &&
+		(strings.Contains(body, `"error_code":"login"`) ||
+			strings.Contains(body, `"error_code": "login"`) ||
+			strings.Contains(body, "you must login first"))
 }
 
 // ---------------------------------------------------------------------------
