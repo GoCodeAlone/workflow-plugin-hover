@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -121,6 +122,47 @@ func fakeWriteMuxRequiringCookie(t *testing.T, controlPanelHTML, cookieName stri
 	})
 
 	return mux, log
+}
+
+func fakeWriteMuxRejectingFirstNameserverPUT(t *testing.T) (*http.ServeMux, *writeRequestLog, *int, *int) {
+	t.Helper()
+	log := &writeRequestLog{}
+	mux := http.NewServeMux()
+	var mu sync.Mutex
+	signins := 0
+	puts := 0
+
+	mux.HandleFunc("/signin", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		signins++
+		cookieValue := fmt.Sprintf("fake-session-%d", signins)
+		mu.Unlock()
+		http.SetCookie(w, &http.Cookie{Name: "__uzma", Value: cookieValue, Path: "/", HttpOnly: true})
+		_, _ = w.Write([]byte(`<html><body>signin</body></html>`))
+	})
+	mux.HandleFunc("/signin/auth.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"succeeded": true, "status": "completed"})
+	})
+	mux.HandleFunc("/control_panel/", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`<html><head><meta name="csrf-token" content="test-csrf-abc"></head></html>`))
+	})
+	mux.HandleFunc("/api/control_panel/", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		puts++
+		thisPut := puts
+		mu.Unlock()
+		if thisPut == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"succeeded":false,"error_code":"login","error":"You must login first"}`))
+			return
+		}
+		log.record(r)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	})
+
+	return mux, log, &signins, &puts
 }
 
 // writeRequestLog captures the last recorded HTTP request (method, path, body,
@@ -430,6 +472,36 @@ func TestBrowserBackend_SetNameserversSyncsJarCookiesToBrowser(t *testing.T) {
 	}
 	if _, err := (&http.Request{Header: req.Header}).Cookie(sessionCookie); err != nil {
 		t.Fatalf("PUT missing synced %s cookie: %v", sessionCookie, err)
+	}
+}
+
+func TestBrowserBackend_SetNameserversRefreshesLoginOnHover401(t *testing.T) {
+	mux, log, signins, puts := fakeWriteMuxRejectingFirstNameserverPUT(t)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c := newWriteBrowserClient(t, srv)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	ns := []string{"ns1.example.com", "ns2.example.com"}
+	if err := c.SetNameservers(ctx, "example.com", ns); err != nil {
+		t.Fatalf("SetNameservers after login refresh: %v", err)
+	}
+
+	if *puts != 2 {
+		t.Fatalf("PUT attempts = %d, want 2", *puts)
+	}
+	if *signins < 2 {
+		t.Fatalf("signin attempts = %d, want at least 2", *signins)
+	}
+	req, ok := log.firstMatching(http.MethodPut, "/api/control_panel/domains/domain-example.com")
+	if !ok {
+		t.Fatal("successful PUT /api/control_panel/domains/domain-example.com not observed by server")
+	}
+	if got := req.Header.Get("X-CSRF-Token"); got != "test-csrf-abc" {
+		t.Errorf("X-CSRF-Token = %q, want test-csrf-abc", got)
 	}
 }
 
