@@ -544,7 +544,18 @@ func (b *browserBackend) SetNameservers(ctx context.Context, c *Client, domainNa
 		return err
 	}
 	if isHoverLoginResponse(code, rawBody) {
-		fmt.Fprintf(os.Stderr, "hover browser SetNameservers %q: session rejected by Hover; refreshing login and retrying once\n", domainName)
+		fmt.Fprintf(os.Stderr, "hover browser SetNameservers %q: session rejected by Hover; revalidating cached browser session\n", domainName)
+		if ok, probeErr := b.revalidateBrowserSession(ctx, c); probeErr != nil {
+			return fmt.Errorf("hover browser SetNameservers %q: revalidate browser session after HTTP %d: %w", domainName, code, probeErr)
+		} else if ok {
+			rawBody, code, err = b.setNameserversOnce(ctx, c, domainName, ns)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if isHoverLoginResponse(code, rawBody) {
+		fmt.Fprintf(os.Stderr, "hover browser SetNameservers %q: cached browser session still rejected; refreshing login and retrying once\n", domainName)
 		if err := b.forceLogin(ctx, c); err != nil {
 			return fmt.Errorf("hover browser SetNameservers %q: refresh login after HTTP %d: %w", domainName, code, err)
 		}
@@ -557,6 +568,45 @@ func (b *browserBackend) SetNameservers(ctx context.Context, c *Client, domainNa
 		return fmt.Errorf("hover browser SetNameservers %q: HTTP %d: %s", domainName, code, strings.TrimSpace(rawBody))
 	}
 	return nil
+}
+
+func (b *browserBackend) revalidateBrowserSession(ctx context.Context, c *Client) (bool, error) {
+	if b.browser == nil {
+		return false, nil
+	}
+	base := b.signinHost()
+	if err := b.syncJarCookiesToBrowser(ctx, c); err != nil {
+		return false, fmt.Errorf("cookie sync: %w", err)
+	}
+	page, cleanup, err := b.openWritePage(ctx, base)
+	if err != nil {
+		return false, err
+	}
+	defer cleanup()
+
+	rawBody, code, err := browserFetchJSON(ctx, page, "GET", base+"/api/domains", "", nil)
+	if err != nil {
+		return false, fmt.Errorf("probe /api/domains: %w", err)
+	}
+	if code < 200 || code >= 300 {
+		return false, nil
+	}
+	var body struct {
+		Succeeded bool `json:"succeeded"`
+	}
+	if err := json.Unmarshal([]byte(rawBody), &body); err != nil {
+		return false, nil
+	}
+	if !body.Succeeded {
+		return false, nil
+	}
+	if err := b.handOffCookies(b.browser.Context(ctx), c); err != nil {
+		return false, fmt.Errorf("cookie handoff: %w", err)
+	}
+	c.mu.Lock()
+	c.loggedAt = time.Now()
+	c.mu.Unlock()
+	return true, nil
 }
 
 func (b *browserBackend) setNameserversOnce(ctx context.Context, c *Client, domainName string, ns []string) (string, int, error) {
