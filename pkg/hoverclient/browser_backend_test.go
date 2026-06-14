@@ -296,7 +296,7 @@ func TestBrowserBackend_LoginEmail2FAWithoutTOTP(t *testing.T) {
 func TestBrowserBackend_LoginRejectsHTTP200SucceededFalse(t *testing.T) {
 	opts := newBrowserTestOpts(t)
 
-	auth := map[string]any{"succeeded": false, "error": "Invalid username or password."}
+	auth := map[string]any{"succeeded": false}
 	mux := fakeSigninMux(auth, nil)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -312,8 +312,8 @@ func TestBrowserBackend_LoginRejectsHTTP200SucceededFalse(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected succeeded=false signin response to fail")
 	}
-	if !strings.Contains(err.Error(), "Invalid username or password") {
-		t.Fatalf("error = %v, want Hover signin error text", err)
+	if !strings.Contains(err.Error(), "did not complete") {
+		t.Fatalf("error = %v, want semantic signin failure", err)
 	}
 	c.mu.Lock()
 	loggedAt := c.loggedAt
