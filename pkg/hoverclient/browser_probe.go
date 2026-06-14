@@ -190,7 +190,7 @@ func isClearanceCookie(name string) bool {
 type browserSigninResult struct {
 	OK        bool   `json:"ok"`
 	HTTPCode  int    `json:"httpCode"`
-	Succeeded bool   `json:"succeeded"`
+	Succeeded *bool  `json:"succeeded"`
 	Status    string `json:"status"`
 	Error     string `json:"error"`
 	Raw       string `json:"raw"`
@@ -226,6 +226,12 @@ func submitBrowserSignin(ctx context.Context, page *rod.Page, creds Credentials)
 	}
 	if result.Error != "" {
 		return fmt.Errorf("hover browser signin: %s", result.Error)
+	}
+	if result.Succeeded != nil && !*result.Succeeded {
+		return fmt.Errorf("hover browser signin: did not complete: %s", summarizeSigninRaw(result.Raw))
+	}
+	if result.Status != "" && result.Status != "completed" {
+		return fmt.Errorf("hover browser signin: unexpected status %q: %s", result.Status, summarizeSigninRaw(result.Raw))
 	}
 	return nil
 }
@@ -275,7 +281,7 @@ func browserSigninFetch(ctx context.Context, page *rod.Page, endpoint string, pa
 		return browserSigninResult{}, fmt.Errorf("hover browser signin: fetch %s: %w", endpoint, err)
 	}
 	var parsed struct {
-		Succeeded bool   `json:"succeeded"`
+		Succeeded *bool  `json:"succeeded"`
 		Status    string `json:"status"`
 		Error     string `json:"error"`
 	}
