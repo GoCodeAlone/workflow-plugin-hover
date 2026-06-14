@@ -197,7 +197,7 @@ type browserSigninResult struct {
 }
 
 func submitBrowserSignin(ctx context.Context, page *rod.Page, creds Credentials) error {
-	result, err := browserSigninFetch(ctx, page, "/signin/auth.json", map[string]any{
+	result, err := browserSigninFetchWithRetry(ctx, page, "/signin/auth.json", map[string]any{
 		"username": creds.Username,
 		"password": creds.Password,
 		"remember": false,
@@ -210,7 +210,7 @@ func submitBrowserSignin(ctx context.Context, page *rod.Page, creds Credentials)
 		if creds.TOTPSecret.key == nil {
 			return fmt.Errorf("hover: account has MFA enabled but no totp_secret was provided")
 		}
-		result, err = browserSigninFetch(ctx, page, "/signin/auth2.json", map[string]any{
+		result, err = browserSigninFetchWithRetry(ctx, page, "/signin/auth2.json", map[string]any{
 			"code":     creds.TOTPSecret.Code(),
 			"remember": false,
 		})
@@ -222,12 +222,48 @@ func submitBrowserSignin(ctx context.Context, page *rod.Page, creds Credentials)
 		if result.Error != "" {
 			return fmt.Errorf("hover browser signin: HTTP %d: %s", result.HTTPCode, result.Error)
 		}
-		return fmt.Errorf("hover browser signin: HTTP %d: %s", result.HTTPCode, strings.TrimSpace(result.Raw))
+		return fmt.Errorf("hover browser signin: HTTP %d: %s", result.HTTPCode, summarizeSigninRaw(result.Raw))
 	}
 	if result.Error != "" {
 		return fmt.Errorf("hover browser signin: %s", result.Error)
 	}
 	return nil
+}
+
+func browserSigninFetchWithRetry(ctx context.Context, page *rod.Page, endpoint string, payload map[string]any) (browserSigninResult, error) {
+	var result browserSigninResult
+	var err error
+	for attempt := 0; ; attempt++ {
+		result, err = browserSigninFetch(ctx, page, endpoint, payload)
+		if err != nil {
+			return browserSigninResult{}, err
+		}
+		if !isRetryableBrowserSigninStatus(result.HTTPCode) || attempt >= maxRetries {
+			return result, nil
+		}
+		wait := retryBaseDelay << attempt
+		if wait > maxBackoffCap {
+			wait = maxBackoffCap
+		}
+		fmt.Fprintf(os.Stderr, "hover browser signin: HTTP %d from %s; retrying in %s\n", result.HTTPCode, endpoint, wait)
+		select {
+		case <-ctx.Done():
+			return browserSigninResult{}, ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+}
+
+func isRetryableBrowserSigninStatus(code int) bool {
+	return code == http.StatusTooManyRequests || code == http.StatusServiceUnavailable
+}
+
+func summarizeSigninRaw(raw string) string {
+	summary := strings.TrimSpace(raw)
+	if len(summary) > 300 {
+		summary = summary[:300] + "...(truncated)"
+	}
+	return summary
 }
 
 func browserSigninFetch(ctx context.Context, page *rod.Page, endpoint string, payload map[string]any) (browserSigninResult, error) {

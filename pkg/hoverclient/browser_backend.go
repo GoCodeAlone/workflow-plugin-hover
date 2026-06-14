@@ -230,8 +230,8 @@ func (b *browserBackend) classifySigninError(err error) error {
 	if strings.Contains(msg, "no totp_secret") || strings.Contains(msg, "totp_secret was provided") {
 		return fmt.Errorf("%w: %v", ErrEmail2FARequired, err)
 	}
-	// HTTP 401/403 from auth endpoint → bot challenge.
-	if strings.Contains(msg, "HTTP 401") || strings.Contains(msg, "HTTP 403") {
+	// HTTP 401/403/429 from auth endpoint → bot/rate challenge.
+	if strings.Contains(msg, "HTTP 401") || strings.Contains(msg, "HTTP 403") || strings.Contains(msg, "HTTP 429") {
 		return fmt.Errorf("%w: %v", ErrBotChallenge, err)
 	}
 	return err
