@@ -605,6 +605,34 @@ func TestGetTransferLock_FromListDomains(t *testing.T) {
 	}
 }
 
+func TestGetTransferLock_FromListDomainsBoolean(t *testing.T) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/domains" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"succeeded": true,
+			"domains": []map[string]any{{
+				"id":          "domain-example.com",
+				"domain_name": "example.com",
+				"locked":      true,
+			}},
+		})
+	})
+	defer srv.Close()
+	c.loggedAt = time.Now()
+
+	locked, err := c.GetTransferLock(context.Background(), "example.com")
+	if err != nil {
+		t.Fatalf("GetTransferLock: %v", err)
+	}
+	if !locked {
+		t.Fatal("locked = false, want true")
+	}
+}
+
 func TestGetTransferLock_MissingStateFails(t *testing.T) {
 	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/domains" {
