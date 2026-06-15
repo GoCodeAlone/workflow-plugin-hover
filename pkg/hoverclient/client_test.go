@@ -633,6 +633,16 @@ func TestGetTransferLock_FromListDomainsBoolean(t *testing.T) {
 	}
 }
 
+func TestDomainUnmarshalLockedNull(t *testing.T) {
+	var domain Domain
+	if err := json.Unmarshal([]byte(`{"id":"domain-example.com","domain_name":"example.com","locked": null }`), &domain); err != nil {
+		t.Fatalf("Unmarshal Domain: %v", err)
+	}
+	if domain.Locked != "" {
+		t.Fatalf("Locked = %q, want empty", domain.Locked)
+	}
+}
+
 func TestGetTransferLock_MissingStateFails(t *testing.T) {
 	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/domains" {

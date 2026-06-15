@@ -399,22 +399,22 @@ type DNSRecord struct {
 	TTL     int    `json:"ttl,omitempty"`
 }
 
-// HoverLockState accepts the lock formats Hover has returned from /api/domains:
+// hoverLockState accepts the lock formats Hover has returned from /api/domains:
 // string values such as "on"/"off" and booleans such as true/false.
-type HoverLockState string
+type hoverLockState string
 
-func (s *HoverLockState) UnmarshalJSON(data []byte) error {
+func (s *hoverLockState) UnmarshalJSON(data []byte) error {
 	var text string
 	if err := json.Unmarshal(data, &text); err == nil {
-		*s = HoverLockState(text)
+		*s = hoverLockState(text)
 		return nil
 	}
 	var locked bool
 	if err := json.Unmarshal(data, &locked); err == nil {
-		*s = HoverLockState(strconv.FormatBool(locked))
+		*s = hoverLockState(strconv.FormatBool(locked))
 		return nil
 	}
-	if string(data) == "null" {
+	if string(bytes.TrimSpace(data)) == "null" {
 		*s = ""
 		return nil
 	}
@@ -423,11 +423,30 @@ func (s *HoverLockState) UnmarshalJSON(data []byte) error {
 
 // Domain is the API shape returned by GET /api/domains.
 type Domain struct {
-	ID          string         `json:"id"`
-	Name        string         `json:"domain_name"`
-	Records     []DNSRecord    `json:"entries"`
-	Nameservers []string       `json:"nameservers"`
-	Locked      HoverLockState `json:"locked"`
+	ID          string      `json:"id"`
+	Name        string      `json:"domain_name"`
+	Records     []DNSRecord `json:"entries"`
+	Nameservers []string    `json:"nameservers"`
+	Locked      string      `json:"locked"`
+}
+
+func (d *Domain) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		ID          string         `json:"id"`
+		Name        string         `json:"domain_name"`
+		Records     []DNSRecord    `json:"entries"`
+		Nameservers []string       `json:"nameservers"`
+		Locked      hoverLockState `json:"locked"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	d.ID = raw.ID
+	d.Name = raw.Name
+	d.Records = raw.Records
+	d.Nameservers = raw.Nameservers
+	d.Locked = string(raw.Locked)
+	return nil
 }
 
 // DomainForward is Hover's account-level web forwarding state for a domain.
@@ -449,7 +468,7 @@ func (c *Client) getTransferLockHTTP(ctx context.Context, domainName string) (bo
 	}
 	for _, domain := range domains {
 		if strings.EqualFold(domain.Name, domainName) {
-			locked, ok := parseHoverLock(string(domain.Locked))
+			locked, ok := parseHoverLock(domain.Locked)
 			if !ok {
 				return false, fmt.Errorf("hover: GetTransferLock %q: lock state missing from /api/domains response", domainName)
 			}
