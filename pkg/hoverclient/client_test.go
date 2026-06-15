@@ -577,6 +577,204 @@ func TestSetNameservers_Non2xxPUT(t *testing.T) {
 	}
 }
 
+func TestGetTransferLock_FromListDomains(t *testing.T) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/domains" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"succeeded": true,
+			"domains": []map[string]any{{
+				"id":          "domain-example.com",
+				"domain_name": "example.com",
+				"locked":      "on",
+			}},
+		})
+	})
+	defer srv.Close()
+	c.loggedAt = time.Now()
+
+	locked, err := c.GetTransferLock(context.Background(), "example.com")
+	if err != nil {
+		t.Fatalf("GetTransferLock: %v", err)
+	}
+	if !locked {
+		t.Fatal("locked = false, want true")
+	}
+}
+
+func TestGetTransferLock_MissingStateFails(t *testing.T) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/domains" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"succeeded": true,
+			"domains": []map[string]any{{
+				"id":          "domain-example.com",
+				"domain_name": "example.com",
+			}},
+		})
+	})
+	defer srv.Close()
+	c.loggedAt = time.Now()
+
+	_, err := c.GetTransferLock(context.Background(), "example.com")
+	if err == nil {
+		t.Fatal("expected error when /api/domains omits lock state")
+	}
+	if !strings.Contains(err.Error(), "lock state missing") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSetTransferLock_PUTShape(t *testing.T) {
+	var capturedURL, capturedToken, capturedCT string
+	var capturedBody []byte
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/control_panel/domain/example.com":
+			_, _ = w.Write([]byte(`<meta name="csrf-token" content="test-csrf-token">`))
+		case "/api/control_panel/domains/domain-example.com":
+			capturedURL = r.URL.Path
+			capturedToken = r.Header.Get("X-CSRF-Token")
+			capturedCT = r.Header.Get("Content-Type")
+			capturedBody, _ = io.ReadAll(r.Body)
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+	})
+	defer srv.Close()
+	c.loggedAt = time.Now()
+
+	err := c.SetTransferLock(context.Background(), "example.com", false)
+	if err != nil {
+		t.Fatalf("SetTransferLock: %v", err)
+	}
+	if capturedURL != "/api/control_panel/domains/domain-example.com" {
+		t.Errorf("URL = %q", capturedURL)
+	}
+	if capturedToken != "test-csrf-token" {
+		t.Errorf("X-CSRF-Token = %q", capturedToken)
+	}
+	if !strings.HasPrefix(capturedCT, "application/json") {
+		t.Errorf("Content-Type = %q", capturedCT)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(capturedBody, &payload); err != nil {
+		t.Fatalf("body decode: %v", err)
+	}
+	if payload["field"] != "locked" {
+		t.Errorf("field = %v", payload["field"])
+	}
+	if payload["value"] != false {
+		t.Errorf("value = %v, want false", payload["value"])
+	}
+}
+
+func TestGetForward_RootForward(t *testing.T) {
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/control_panel/forwards/buymywishlist.net" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"succeeded": true,
+			"domain": map[string]any{
+				"id":                    "domain-buymywishlist.net",
+				"name":                  "buymywishlist.net",
+				"redirects":             []any{},
+				"forward":               "http://buymywishlist.com",
+				"has_stealth_redirects": false,
+			},
+		})
+	})
+	defer srv.Close()
+	c.loggedAt = time.Now()
+
+	forward, err := c.GetForward(context.Background(), "buymywishlist.net")
+	if err != nil {
+		t.Fatalf("GetForward: %v", err)
+	}
+	if forward.Domain != "buymywishlist.net" {
+		t.Fatalf("Domain = %q", forward.Domain)
+	}
+	if forward.URL != "http://buymywishlist.com" {
+		t.Fatalf("URL = %q", forward.URL)
+	}
+	if forward.Stealth {
+		t.Fatal("Stealth = true, want false")
+	}
+}
+
+func TestSetForward_PUTShape(t *testing.T) {
+	var capturedURL, capturedToken, capturedCT string
+	var capturedBody []byte
+	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/control_panel/domain/buymywishlist.net":
+			_, _ = w.Write([]byte(`<meta name="csrf-token" content="test-csrf-token">`))
+		case "/api/control_panel/forwards":
+			capturedURL = r.URL.Path
+			capturedToken = r.Header.Get("X-CSRF-Token")
+			capturedCT = r.Header.Get("Content-Type")
+			capturedBody, _ = io.ReadAll(r.Body)
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+	})
+	defer srv.Close()
+	c.loggedAt = time.Now()
+
+	err := c.SetForward(context.Background(), "buymywishlist.net", DomainForward{
+		URL:     "http://buymywishlist.com",
+		Stealth: false,
+	})
+	if err != nil {
+		t.Fatalf("SetForward: %v", err)
+	}
+	if capturedURL != "/api/control_panel/forwards" {
+		t.Errorf("URL = %q", capturedURL)
+	}
+	if capturedToken != "test-csrf-token" {
+		t.Errorf("X-CSRF-Token = %q", capturedToken)
+	}
+	if !strings.HasPrefix(capturedCT, "application/json") {
+		t.Errorf("Content-Type = %q", capturedCT)
+	}
+	var payload struct {
+		Domains []struct {
+			ID       string   `json:"id"`
+			Forwards []string `json:"forwards"`
+		} `json:"domains"`
+		Fields struct {
+			Path    string `json:"path"`
+			URL     string `json:"url"`
+			Stealth bool   `json:"stealth"`
+			Type    string `json:"type"`
+		} `json:"fields"`
+	}
+	if err := json.Unmarshal(capturedBody, &payload); err != nil {
+		t.Fatalf("body decode: %v", err)
+	}
+	if len(payload.Domains) != 1 || payload.Domains[0].ID != "domain-buymywishlist.net" {
+		t.Fatalf("domains = %#v", payload.Domains)
+	}
+	if len(payload.Domains[0].Forwards) != 1 || payload.Domains[0].Forwards[0] != "hpr-domain-buymywishlist.net" {
+		t.Fatalf("forwards = %#v", payload.Domains[0].Forwards)
+	}
+	if payload.Fields.Path != "buymywishlist.net" || payload.Fields.URL != "http://buymywishlist.com" || payload.Fields.Stealth || payload.Fields.Type != "root" {
+		t.Fatalf("fields = %#v", payload.Fields)
+	}
+}
+
 func TestDomainDelegation_JSONShape(t *testing.T) {
 	// Tentative envelope per design A6: flat object, not wrapped.
 	body := `{"id":"domain-example.com","domain_name":"example.com","nameservers":["a.com","b.com"]}`

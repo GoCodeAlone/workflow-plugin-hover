@@ -32,6 +32,8 @@ type hoverDomainLister interface {
 // Supports two resource types:
 //   - infra.dns           — DNS records within Hover's nameservers.
 //   - infra.dns_delegation — registrar-level nameserver delegation.
+//   - infra.domain        — registrar-level domain settings.
+//   - infra.http_redirect — Hover root web forwarding.
 type HoverProvider struct {
 	client  *hoverclient.Client
 	drivers map[string]interfaces.ResourceDriver
@@ -113,6 +115,8 @@ func (p *HoverProvider) Initialize(ctx context.Context, config map[string]any) e
 	p.drivers = map[string]interfaces.ResourceDriver{
 		"infra.dns":            drivers.NewDNSDriver(c),
 		"infra.dns_delegation": drivers.NewDelegationDriver(c),
+		"infra.domain":         drivers.NewDomainDriver(c),
+		"infra.http_redirect":  drivers.NewRedirectDriver(c),
 	}
 	return nil
 }
@@ -129,6 +133,16 @@ func (p *HoverProvider) Capabilities() []interfaces.IaCCapabilityDeclaration {
 			ResourceType: "infra.dns_delegation",
 			Tier:         1,
 			Operations:   []string{"create", "read", "update", "delete"},
+		},
+		{
+			ResourceType: "infra.domain",
+			Tier:         1,
+			Operations:   []string{"create", "read", "update"},
+		},
+		{
+			ResourceType: "infra.http_redirect",
+			Tier:         1,
+			Operations:   []string{"create", "read", "update"},
 		},
 	}
 }
@@ -361,7 +375,7 @@ func (p *HoverProvider) EnumerateAll(ctx context.Context, resourceType string) (
 	if p.domains == nil {
 		return nil, fmt.Errorf("hover: EnumerateAll called on provider that is not initialized — call Initialize first")
 	}
-	if resourceType != "infra.dns" && resourceType != "infra.dns_delegation" {
+	if resourceType != "infra.dns" && resourceType != "infra.dns_delegation" && resourceType != "infra.domain" && resourceType != "infra.http_redirect" {
 		return nil, fmt.Errorf("hover: EnumerateAll: resource type %q not supported", resourceType)
 	}
 	domains, err := p.domains.ListDomains(ctx)

@@ -19,6 +19,8 @@ func TestHoverProvider_Capabilities_IncludesDelegation(t *testing.T) {
 	wantTypes := map[string]bool{
 		"infra.dns":            false,
 		"infra.dns_delegation": false,
+		"infra.domain":         false,
+		"infra.http_redirect":  false,
 	}
 	for _, c := range caps {
 		if _, ok := wantTypes[c.ResourceType]; ok {
@@ -252,7 +254,7 @@ func TestEnumerateAll_DelegationListsDomains(t *testing.T) {
 // and HoverProvider.domains field. It also satisfies hoverclient.HoverClient
 // via a nil client stored in drivers so we need a separate provider-level stub.
 type fakeDelegationClientForImport struct {
-	registrarNS []string
+	registrarNS  []string
 	registrarErr error
 }
 

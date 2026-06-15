@@ -42,14 +42,14 @@ func TestHoverIaCServer_Capabilities(t *testing.T) {
 		t.Errorf("ComputePlanVersion = %q want %q", resp.GetComputePlanVersion(), "v2")
 	}
 	caps := resp.GetCapabilities()
-	if len(caps) != 2 {
-		t.Fatalf("expected 2 capabilities, got %d", len(caps))
+	if len(caps) != 4 {
+		t.Fatalf("expected 4 capabilities, got %d", len(caps))
 	}
 	gotTypes := map[string]bool{}
 	for _, c := range caps {
 		gotTypes[c.GetResourceType()] = true
 	}
-	for _, want := range []string{"infra.dns", "infra.dns_delegation"} {
+	for _, want := range []string{"infra.dns", "infra.dns_delegation", "infra.domain", "infra.http_redirect"} {
 		if !gotTypes[want] {
 			t.Errorf("capability %q missing", want)
 		}

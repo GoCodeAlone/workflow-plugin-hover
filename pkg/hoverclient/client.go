@@ -269,6 +269,9 @@ var (
 	csrfMetaReContentFirst = regexp.MustCompile(`<meta\s+content\s*=\s*['"]([^'"]+)['"]\s+name\s*=\s*['"]csrf-token['"]`)
 )
 
+// ErrForwardNotFound is returned when Hover has no root forward configured.
+var ErrForwardNotFound = errors.New("hover: forward not found")
+
 // extractCSRFMeta returns the CSRF meta token regardless of attribute
 // order or quote style. Returns "" if no match.
 func extractCSRFMeta(body []byte) string {
@@ -402,6 +405,150 @@ type Domain struct {
 	Name        string      `json:"domain_name"`
 	Records     []DNSRecord `json:"entries"`
 	Nameservers []string    `json:"nameservers"`
+	Locked      string      `json:"locked"`
+}
+
+// DomainForward is Hover's account-level web forwarding state for a domain.
+type DomainForward struct {
+	Domain  string `json:"domain"`
+	URL     string `json:"url"`
+	Stealth bool   `json:"stealth"`
+}
+
+// GetTransferLock returns the registrar transfer-lock state for a domain.
+func (c *Client) GetTransferLock(ctx context.Context, domainName string) (bool, error) {
+	return c.backend.GetTransferLock(ctx, c, domainName)
+}
+
+func (c *Client) getTransferLockHTTP(ctx context.Context, domainName string) (bool, error) {
+	domains, err := c.ListDomains(ctx)
+	if err != nil {
+		return false, fmt.Errorf("hover: GetTransferLock %q: %w", domainName, err)
+	}
+	for _, domain := range domains {
+		if strings.EqualFold(domain.Name, domainName) {
+			locked, ok := parseHoverLock(domain.Locked)
+			if !ok {
+				return false, fmt.Errorf("hover: GetTransferLock %q: lock state missing from /api/domains response", domainName)
+			}
+			return locked, nil
+		}
+	}
+	return false, fmt.Errorf("hover: GetTransferLock %q: domain not found", domainName)
+}
+
+func parseHoverLock(raw string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "on", "true", "locked", "1", "yes":
+		return true, true
+	case "off", "false", "unlocked", "0", "no":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+// GetForward returns Hover's root web-forwarding target for a domain.
+func (c *Client) GetForward(ctx context.Context, domainName string) (*DomainForward, error) {
+	return c.backend.GetForward(ctx, c, domainName)
+}
+
+func (c *Client) getForwardHTTP(ctx context.Context, domainName string) (*DomainForward, error) {
+	if err := c.ensureLogin(ctx); err != nil {
+		return nil, err
+	}
+	endpoint := fmt.Sprintf("%s/api/control_panel/forwards/%s", hoverHost, url.PathEscape(domainName))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", c.UserAgent)
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, fmt.Errorf("hover: GetForward %q: %w", domainName, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("hover: GetForward %q: HTTP %d: %s", domainName, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var body struct {
+		Succeeded bool `json:"succeeded"`
+		Domain    struct {
+			Name                string `json:"name"`
+			Forward             string `json:"forward"`
+			HasStealthRedirects bool   `json:"has_stealth_redirects"`
+		} `json:"domain"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, fmt.Errorf("hover: GetForward %q: decode: %w", domainName, err)
+	}
+	if !body.Succeeded {
+		return nil, fmt.Errorf("hover: GetForward %q: API returned succeeded=false", domainName)
+	}
+	if strings.TrimSpace(body.Domain.Forward) == "" {
+		return nil, fmt.Errorf("%w: hover: GetForward %q: no root forward configured", ErrForwardNotFound, domainName)
+	}
+	name := body.Domain.Name
+	if name == "" {
+		name = domainName
+	}
+	return &DomainForward{
+		Domain:  name,
+		URL:     body.Domain.Forward,
+		Stealth: body.Domain.HasStealthRedirects,
+	}, nil
+}
+
+// SetForward updates Hover's root web-forwarding target for a domain.
+func (c *Client) SetForward(ctx context.Context, domainName string, forward DomainForward) error {
+	return c.backend.SetForward(ctx, c, domainName, forward)
+}
+
+func (c *Client) setForwardHTTP(ctx context.Context, domainName string, forward DomainForward) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.ensureLoginLocked(ctx); err != nil {
+		return err
+	}
+	csrf, err := c.fetchControlPanelCSRFLocked(ctx, domainName)
+	if err != nil {
+		return err
+	}
+	return c.putForwardLocked(ctx, domainName, forward, csrf)
+}
+
+func (c *Client) putForwardLocked(ctx context.Context, domainName string, forward DomainForward, csrf string) error {
+	endpoint := hoverHost + "/api/control_panel/forwards"
+	forwardID := fmt.Sprintf("hpr-domain-%s", domainName)
+	payload := map[string]any{
+		"domains": []map[string]any{{
+			"id":       fmt.Sprintf("domain-%s", domainName),
+			"forwards": []string{forwardID},
+		}},
+		"fields": map[string]any{
+			"path":    domainName,
+			"url":     forward.URL,
+			"stealth": forward.Stealth,
+			"type":    "root",
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("hover: SetForward %q: marshal: %w", domainName, err)
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
+	req.Header.Set("User-Agent", c.UserAgent)
+	req.Header.Set("X-CSRF-Token", csrf)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("hover: SetForward %q: %w", domainName, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("hover: SetForward %q: HTTP %d: %s", domainName, resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	return nil
 }
 
 // GetDomainDelegation fetches the registrar-level nameserver delegation for
@@ -503,6 +650,11 @@ func (c *Client) SetNameservers(ctx context.Context, domainName string, ns []str
 	return c.backend.SetNameservers(ctx, c, domainName, ns)
 }
 
+// SetTransferLock updates Hover's registrar transfer-lock setting.
+func (c *Client) SetTransferLock(ctx context.Context, domainName string, locked bool) error {
+	return c.backend.SetTransferLock(ctx, c, domainName, locked)
+}
+
 // setNameserversHTTP is the HTTP-backend implementation of SetNameservers.
 func (c *Client) setNameserversHTTP(ctx context.Context, domainName string, ns []string) error {
 	c.mu.Lock()
@@ -517,6 +669,19 @@ func (c *Client) setNameserversHTTP(ctx context.Context, domainName string, ns [
 	return c.putNameserversLocked(ctx, domainName, ns, csrf)
 }
 
+func (c *Client) setTransferLockHTTP(ctx context.Context, domainName string, locked bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.ensureLoginLocked(ctx); err != nil {
+		return err
+	}
+	csrf, err := c.fetchControlPanelCSRFLocked(ctx, domainName)
+	if err != nil {
+		return err
+	}
+	return c.putControlPanelFieldLocked(ctx, domainName, "locked", locked, csrf)
+}
+
 // putNameserversLocked PUTs the nameservers list. Caller MUST hold c.mu.
 //
 // Note: the wire payload uses []string directly — encoding/json serializes
@@ -525,11 +690,15 @@ func (c *Client) setNameserversHTTP(ctx context.Context, domainName string, ns [
 // structpb gRPC boundary); typed slices are fine here because the wire
 // format is plain JSON, not structpb.
 func (c *Client) putNameserversLocked(ctx context.Context, domainName string, ns []string, csrf string) error {
+	return c.putControlPanelFieldLocked(ctx, domainName, "nameservers", ns, csrf)
+}
+
+func (c *Client) putControlPanelFieldLocked(ctx context.Context, domainName, field string, value any, csrf string) error {
 	endpoint := fmt.Sprintf("%s/api/control_panel/domains/domain-%s", hoverHost, url.PathEscape(domainName))
-	payload := map[string]any{"field": "nameservers", "value": ns}
+	payload := map[string]any{"field": field, "value": value}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("hover: SetNameservers %q: marshal: %w", domainName, err)
+		return fmt.Errorf("hover: set control_panel field %q for %q: marshal: %w", field, domainName, err)
 	}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -537,12 +706,12 @@ func (c *Client) putNameserversLocked(ctx context.Context, domainName string, ns
 	req.Header.Set("X-CSRF-Token", csrf)
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("hover: SetNameservers %q: %w", domainName, err)
+		return fmt.Errorf("hover: set control_panel field %q for %q: %w", field, domainName, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("hover: SetNameservers %q: HTTP %d: %s", domainName, resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return fmt.Errorf("hover: set control_panel field %q for %q: HTTP %d: %s", field, domainName, resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 	return nil
 }
