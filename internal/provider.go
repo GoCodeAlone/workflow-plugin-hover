@@ -29,7 +29,7 @@ type hoverDomainLister interface {
 }
 
 // HoverProvider implements interfaces.IaCProvider for Hover.
-// Supports two resource types:
+// Supported resource types:
 //   - infra.dns           — DNS records within Hover's nameservers.
 //   - infra.dns_delegation — registrar-level nameserver delegation.
 //   - infra.domain        — registrar-level domain settings.
@@ -361,8 +361,8 @@ func (p *HoverProvider) SupportedCanonicalKeys() []string {
 // Close is a no-op; the HTTP client has no persistent connections to tear down.
 func (p *HoverProvider) Close() error { return nil }
 
-// EnumerateAll implements interfaces.EnumeratorAll for resource type
-// "infra.dns". Walks the account's zones via the injected hoverDomainLister
+// EnumerateAll implements interfaces.EnumeratorAll for account-level Hover
+// resource discovery. Walks the account's zones via the injected hoverDomainLister
 // (production wraps *hoverclient.Client.ListDomains — added in pkg/hoverclient
 // for the cross-repo cascade). Each *ResourceOutput carries the zone name +
 // hover-assigned domain_id so the downstream IaCProvider.Import path can

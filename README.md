@@ -177,7 +177,7 @@ documents this honestly and makes no guarantees of perpetual bypass.
 wfctl infra import --config infra.yaml --name example-com-dns --id example.com
 wfctl infra import --config infra.yaml --name example-com-delegation --id example.com
 wfctl infra import --config infra.yaml --name example-com-domain --id example.com
-wfctl infra import --config infra.yaml --name example-com-forward --id example.com
+wfctl infra import --config infra.yaml --name example-net-forward --id example.net
 ```
 
 Declare the target resource in config first so `wfctl` resolves the Hover
