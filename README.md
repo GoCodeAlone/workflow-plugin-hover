@@ -24,10 +24,11 @@ require an in-page flow run in the same browser instance.
    challenge, and completes TOTP 2FA when configured.
 2. **HTTP reads**: Session + Imperva clearance cookies are transferred to a Go
    `http.Client`; all read operations (`ListDomains`, `GetDomain`, `ListRecords`,
-   `GetDomainDelegation`) use the cookie-reuse path.
+   `GetDomainDelegation`, `GetTransferLock`, `GetForward`) use the cookie-reuse
+   path.
 3. **In-browser writes**: Mutations (`SetNameservers`, `CreateRecord`,
-   `UpdateRecord`, `DeleteRecord`) run in the browser where the full Imperva
-   context is live.
+   `UpdateRecord`, `DeleteRecord`, `SetTransferLock`, `SetForward`) run in the
+   browser where the full Imperva context is live.
 
 The in-process session is considered stale after 1 hour. Across process or CI
 runs, the plugin first checks whether the persistent browser profile is still
@@ -72,6 +73,21 @@ modules:
       records:
         - { type: A,     name: '@',   content: 203.0.113.10, ttl: 900 }
         - { type: CNAME, name: 'www', content: example.com.,  ttl: 900 }
+
+  - name: example-com-domain
+    type: infra.domain
+    config:
+      provider: hover
+      domain: example.com
+      transfer_lock: true
+
+  - name: example-net-forward
+    type: infra.http_redirect
+    config:
+      provider: hover
+      domain: example.net
+      target_url: https://example.com
+      stealth: false
 ```
 
 ### Browser config env vars
@@ -160,12 +176,31 @@ documents this honestly and makes no guarantees of perpetual bypass.
 ```sh
 wfctl infra import --config infra.yaml --name example-com-dns --id example.com
 wfctl infra import --config infra.yaml --name example-com-delegation --id example.com
+wfctl infra import --config infra.yaml --name example-com-domain --id example.com
+wfctl infra import --config infra.yaml --name example-net-forward --id example.net
 ```
 
 Declare the target resource in config first so `wfctl` resolves the Hover
 provider and resource type. `infra.dns` imports zone records; `infra.dns_delegation`
-imports registrar nameservers. Imported state is adoption-shaped so follow-up
-plans compare against live outputs.
+imports registrar nameservers; `infra.domain` imports registrar-level settings
+such as `transfer_lock`; `infra.http_redirect` imports Hover root web forwards.
+Imported state is adoption-shaped so follow-up plans compare against live
+outputs.
+
+## Domain settings
+
+`infra.domain` manages registrar-level domain settings that are independent of
+DNS hosting. The first supported setting is `transfer_lock`. The driver always
+queries Hover's current value before writing, and it skips the PUT when the
+current value already matches the desired value.
+
+## Web forwarding
+
+`infra.http_redirect` manages Hover root forwards. It uses the same config keys
+as other redirect-capable DNS providers where possible: `domain`, optional
+`from_host` (must equal `domain` for Hover root forwards), `target_url`, and
+optional `stealth` (default `false`). The driver reads the current Hover forward
+first and skips the PUT when the target already matches.
 
 ## DNS record semantics
 

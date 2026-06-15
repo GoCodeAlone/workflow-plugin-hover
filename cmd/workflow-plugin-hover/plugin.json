@@ -25,13 +25,17 @@
     "triggerTypes": [],
     "resourceTypes": [
       "infra.dns",
-      "infra.dns_delegation"
+      "infra.dns_delegation",
+      "infra.domain",
+      "infra.http_redirect"
     ],
     "iacProvider": {
       "name": "hover",
       "resourceTypes": [
         "infra.dns",
-        "infra.dns_delegation"
+        "infra.dns_delegation",
+        "infra.domain",
+        "infra.http_redirect"
       ]
     }
   },

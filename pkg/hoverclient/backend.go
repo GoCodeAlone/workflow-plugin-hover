@@ -18,6 +18,10 @@ type executionBackend interface {
 	DeleteRecord(ctx context.Context, c *Client, recordID string) error
 	GetDomainDelegation(ctx context.Context, c *Client, domainName string) (*DomainDelegation, error)
 	SetNameservers(ctx context.Context, c *Client, domainName string, ns []string) error
+	GetTransferLock(ctx context.Context, c *Client, domainName string) (bool, error)
+	SetTransferLock(ctx context.Context, c *Client, domainName string, locked bool) error
+	GetForward(ctx context.Context, c *Client, domainName string) (*DomainForward, error)
+	SetForward(ctx context.Context, c *Client, domainName string, forward DomainForward) error
 	Close() error
 }
 
@@ -60,6 +64,22 @@ func (h *httpBackend) GetDomainDelegation(ctx context.Context, c *Client, domain
 
 func (h *httpBackend) SetNameservers(ctx context.Context, c *Client, domainName string, ns []string) error {
 	return c.setNameserversHTTP(ctx, domainName, ns)
+}
+
+func (h *httpBackend) GetTransferLock(ctx context.Context, c *Client, domainName string) (bool, error) {
+	return c.getTransferLockHTTP(ctx, domainName)
+}
+
+func (h *httpBackend) SetTransferLock(ctx context.Context, c *Client, domainName string, locked bool) error {
+	return c.setTransferLockHTTP(ctx, domainName, locked)
+}
+
+func (h *httpBackend) GetForward(ctx context.Context, c *Client, domainName string) (*DomainForward, error) {
+	return c.getForwardHTTP(ctx, domainName)
+}
+
+func (h *httpBackend) SetForward(ctx context.Context, c *Client, domainName string, forward DomainForward) error {
+	return c.setForwardHTTP(ctx, domainName, forward)
 }
 
 func (h *httpBackend) Close() error { return nil }

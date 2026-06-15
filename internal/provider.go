@@ -29,9 +29,11 @@ type hoverDomainLister interface {
 }
 
 // HoverProvider implements interfaces.IaCProvider for Hover.
-// Supports two resource types:
+// Supported resource types:
 //   - infra.dns           — DNS records within Hover's nameservers.
 //   - infra.dns_delegation — registrar-level nameserver delegation.
+//   - infra.domain        — registrar-level domain settings.
+//   - infra.http_redirect — Hover root web forwarding.
 type HoverProvider struct {
 	client  *hoverclient.Client
 	drivers map[string]interfaces.ResourceDriver
@@ -113,6 +115,8 @@ func (p *HoverProvider) Initialize(ctx context.Context, config map[string]any) e
 	p.drivers = map[string]interfaces.ResourceDriver{
 		"infra.dns":            drivers.NewDNSDriver(c),
 		"infra.dns_delegation": drivers.NewDelegationDriver(c),
+		"infra.domain":         drivers.NewDomainDriver(c),
+		"infra.http_redirect":  drivers.NewRedirectDriver(c),
 	}
 	return nil
 }
@@ -129,6 +133,16 @@ func (p *HoverProvider) Capabilities() []interfaces.IaCCapabilityDeclaration {
 			ResourceType: "infra.dns_delegation",
 			Tier:         1,
 			Operations:   []string{"create", "read", "update", "delete"},
+		},
+		{
+			ResourceType: "infra.domain",
+			Tier:         1,
+			Operations:   []string{"create", "read", "update"},
+		},
+		{
+			ResourceType: "infra.http_redirect",
+			Tier:         1,
+			Operations:   []string{"create", "read", "update"},
 		},
 	}
 }
@@ -347,8 +361,8 @@ func (p *HoverProvider) SupportedCanonicalKeys() []string {
 // Close is a no-op; the HTTP client has no persistent connections to tear down.
 func (p *HoverProvider) Close() error { return nil }
 
-// EnumerateAll implements interfaces.EnumeratorAll for resource type
-// "infra.dns". Walks the account's zones via the injected hoverDomainLister
+// EnumerateAll implements interfaces.EnumeratorAll for account-level Hover
+// resource discovery. Walks the account's zones via the injected hoverDomainLister
 // (production wraps *hoverclient.Client.ListDomains — added in pkg/hoverclient
 // for the cross-repo cascade). Each *ResourceOutput carries the zone name +
 // hover-assigned domain_id so the downstream IaCProvider.Import path can
@@ -361,7 +375,7 @@ func (p *HoverProvider) EnumerateAll(ctx context.Context, resourceType string) (
 	if p.domains == nil {
 		return nil, fmt.Errorf("hover: EnumerateAll called on provider that is not initialized — call Initialize first")
 	}
-	if resourceType != "infra.dns" && resourceType != "infra.dns_delegation" {
+	if resourceType != "infra.dns" && resourceType != "infra.dns_delegation" && resourceType != "infra.domain" && resourceType != "infra.http_redirect" {
 		return nil, fmt.Errorf("hover: EnumerateAll: resource type %q not supported", resourceType)
 	}
 	domains, err := p.domains.ListDomains(ctx)

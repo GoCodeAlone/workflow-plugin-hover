@@ -476,6 +476,20 @@ func (b *browserBackend) GetDomainDelegation(ctx context.Context, c *Client, dom
 	return c.getDomainDelegationHTTP(ctx, domainName)
 }
 
+func (b *browserBackend) GetTransferLock(ctx context.Context, c *Client, domainName string) (bool, error) {
+	if err := b.ensureLoggedIn(ctx, c); err != nil {
+		return false, err
+	}
+	return c.getTransferLockHTTP(ctx, domainName)
+}
+
+func (b *browserBackend) GetForward(ctx context.Context, c *Client, domainName string) (*DomainForward, error) {
+	if err := b.ensureLoggedIn(ctx, c); err != nil {
+		return nil, err
+	}
+	return c.getForwardHTTP(ctx, domainName)
+}
+
 // ---------------------------------------------------------------------------
 // WRITE operations — Task 4: in-browser DNS writes (hybrid write path).
 //
@@ -624,36 +638,79 @@ func (b *browserBackend) SetNameservers(ctx context.Context, c *Client, domainNa
 	if len(ns) == 0 {
 		return fmt.Errorf("hover: SetNameservers %q: %w", domainName, ErrEmptyNameservers)
 	}
+	return b.setControlPanelField(ctx, c, "SetNameservers", domainName, "nameservers", ns)
+}
+
+func (b *browserBackend) SetTransferLock(ctx context.Context, c *Client, domainName string, locked bool) error {
+	return b.setControlPanelField(ctx, c, "SetTransferLock", domainName, "locked", locked)
+}
+
+func (b *browserBackend) SetForward(ctx context.Context, c *Client, domainName string, forward DomainForward) error {
 	if err := b.ensureLoggedIn(ctx, c); err != nil {
 		return err
 	}
-	rawBody, code, err := b.setNameserversOnce(ctx, c, domainName, ns)
+	rawBody, code, err := b.setForwardOnce(ctx, c, domainName, forward)
 	if err != nil {
 		return err
 	}
 	if isHoverLoginResponse(code, rawBody) {
-		fmt.Fprintf(os.Stderr, "hover browser SetNameservers %q: session rejected by Hover; revalidating cached browser session\n", domainName)
+		fmt.Fprintf(os.Stderr, "hover browser SetForward %q: session rejected by Hover; revalidating cached browser session\n", domainName)
 		if ok, probeErr := b.revalidateBrowserSession(ctx, c); probeErr != nil {
-			return fmt.Errorf("hover browser SetNameservers %q: revalidate browser session after HTTP %d: %w", domainName, code, probeErr)
+			return fmt.Errorf("hover browser SetForward %q: revalidate browser session after HTTP %d: %w", domainName, code, probeErr)
 		} else if ok {
-			rawBody, code, err = b.setNameserversOnce(ctx, c, domainName, ns)
+			rawBody, code, err = b.setForwardOnce(ctx, c, domainName, forward)
 			if err != nil {
 				return err
 			}
 		}
 	}
 	if isHoverLoginResponse(code, rawBody) {
-		fmt.Fprintf(os.Stderr, "hover browser SetNameservers %q: cached browser session still rejected; refreshing login and retrying once\n", domainName)
+		fmt.Fprintf(os.Stderr, "hover browser SetForward %q: cached browser session still rejected; refreshing login and retrying once\n", domainName)
 		if err := b.forceLogin(ctx, c); err != nil {
-			return fmt.Errorf("hover browser SetNameservers %q: refresh login after HTTP %d: %w", domainName, code, err)
+			return fmt.Errorf("hover browser SetForward %q: refresh login after HTTP %d: %w", domainName, code, err)
 		}
-		rawBody, code, err = b.setNameserversOnce(ctx, c, domainName, ns)
+		rawBody, code, err = b.setForwardOnce(ctx, c, domainName, forward)
 		if err != nil {
 			return err
 		}
 	}
 	if code >= 400 {
-		return fmt.Errorf("hover browser SetNameservers %q: HTTP %d: %s", domainName, code, strings.TrimSpace(rawBody))
+		return fmt.Errorf("hover browser SetForward %q: HTTP %d: %s", domainName, code, strings.TrimSpace(rawBody))
+	}
+	return nil
+}
+
+func (b *browserBackend) setControlPanelField(ctx context.Context, c *Client, operation, domainName, field string, value any) error {
+	if err := b.ensureLoggedIn(ctx, c); err != nil {
+		return err
+	}
+	rawBody, code, err := b.setControlPanelFieldOnce(ctx, c, operation, domainName, field, value)
+	if err != nil {
+		return err
+	}
+	if isHoverLoginResponse(code, rawBody) {
+		fmt.Fprintf(os.Stderr, "hover browser %s %q: session rejected by Hover; revalidating cached browser session\n", operation, domainName)
+		if ok, probeErr := b.revalidateBrowserSession(ctx, c); probeErr != nil {
+			return fmt.Errorf("hover browser %s %q: revalidate browser session after HTTP %d: %w", operation, domainName, code, probeErr)
+		} else if ok {
+			rawBody, code, err = b.setControlPanelFieldOnce(ctx, c, operation, domainName, field, value)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if isHoverLoginResponse(code, rawBody) {
+		fmt.Fprintf(os.Stderr, "hover browser %s %q: cached browser session still rejected; refreshing login and retrying once\n", operation, domainName)
+		if err := b.forceLogin(ctx, c); err != nil {
+			return fmt.Errorf("hover browser %s %q: refresh login after HTTP %d: %w", operation, domainName, code, err)
+		}
+		rawBody, code, err = b.setControlPanelFieldOnce(ctx, c, operation, domainName, field, value)
+		if err != nil {
+			return err
+		}
+	}
+	if code >= 400 {
+		return fmt.Errorf("hover browser %s %q: HTTP %d: %s", operation, domainName, code, strings.TrimSpace(rawBody))
 	}
 	return nil
 }
@@ -698,12 +755,72 @@ func (b *browserBackend) revalidateBrowserSession(ctx context.Context, c *Client
 }
 
 func (b *browserBackend) setNameserversOnce(ctx context.Context, c *Client, domainName string, ns []string) (string, int, error) {
+	return b.setControlPanelFieldOnce(ctx, c, "SetNameservers", domainName, "nameservers", ns)
+}
+
+func (b *browserBackend) setForwardOnce(ctx context.Context, c *Client, domainName string, forward DomainForward) (string, int, error) {
 	if b.browser == nil {
-		return "", 0, fmt.Errorf("hover browser SetNameservers: browser not initialised (Login must succeed before write operations)")
+		return "", 0, fmt.Errorf("hover browser SetForward: browser not initialised (Login must succeed before write operations)")
 	}
 	base := b.signinHost()
 	if err := b.syncJarCookiesToBrowser(ctx, c); err != nil {
-		return "", 0, fmt.Errorf("hover browser SetNameservers: cookie sync: %w", err)
+		return "", 0, fmt.Errorf("hover browser SetForward: cookie sync: %w", err)
+	}
+
+	page, err := b.browser.Context(ctx).Page(proto.TargetCreateTarget{URL: "about:blank"})
+	if err != nil {
+		return "", 0, fmt.Errorf("hover browser SetForward: new page: %w", err)
+	}
+	page = page.Context(ctx)
+	defer func() { _ = page.Close() }()
+
+	cpURL := fmt.Sprintf("%s/control_panel/domain/%s/forwards", base, url.PathEscape(domainName))
+	if err := page.Navigate(cpURL); err != nil {
+		return "", 0, fmt.Errorf("hover browser SetForward: navigate forwards: %w", err)
+	}
+	_ = page.WaitLoad()
+
+	obj, err := page.Context(ctx).Eval(`() => {
+		const m = document.querySelector('meta[name="csrf-token"]');
+		return m ? m.getAttribute('content') : '';
+	}`)
+	if err != nil {
+		return "", 0, fmt.Errorf("hover browser SetForward: eval CSRF: %w", err)
+	}
+	csrf := obj.Value.String()
+
+	forwardID := fmt.Sprintf("hpr-domain-%s", domainName)
+	payload := map[string]any{
+		"domains": []map[string]any{{
+			"id":       fmt.Sprintf("domain-%s", domainName),
+			"forwards": []string{forwardID},
+		}},
+		"fields": map[string]any{
+			"path":    domainName,
+			"url":     forward.URL,
+			"stealth": forward.Stealth,
+			"type":    "root",
+		},
+	}
+	headers := map[string]string{}
+	if csrf != "" {
+		headers["X-CSRF-Token"] = csrf
+	}
+	rawBody, code, err := browserFetchWithHeaders(ctx, page, "PUT", base+"/api/control_panel/forwards",
+		"application/json;charset=UTF-8", payload, headers)
+	if err != nil {
+		return "", 0, fmt.Errorf("hover browser SetForward %q: fetch: %w", domainName, err)
+	}
+	return rawBody, code, nil
+}
+
+func (b *browserBackend) setControlPanelFieldOnce(ctx context.Context, c *Client, operation, domainName, field string, value any) (string, int, error) {
+	if b.browser == nil {
+		return "", 0, fmt.Errorf("hover browser %s: browser not initialised (Login must succeed before write operations)", operation)
+	}
+	base := b.signinHost()
+	if err := b.syncJarCookiesToBrowser(ctx, c); err != nil {
+		return "", 0, fmt.Errorf("hover browser %s: cookie sync: %w", operation, err)
 	}
 
 	// Open a page and navigate to the control_panel domain page to read the CSRF.
@@ -711,14 +828,14 @@ func (b *browserBackend) setNameserversOnce(ctx context.Context, c *Client, doma
 	// context so new page creation honours the caller's deadline.
 	page, err := b.browser.Context(ctx).Page(proto.TargetCreateTarget{URL: "about:blank"})
 	if err != nil {
-		return "", 0, fmt.Errorf("hover browser SetNameservers: new page: %w", err)
+		return "", 0, fmt.Errorf("hover browser %s: new page: %w", operation, err)
 	}
 	page = page.Context(ctx)
 	defer func() { _ = page.Close() }()
 
 	cpURL := fmt.Sprintf("%s/control_panel/domain/%s", base, url.PathEscape(domainName))
 	if err := page.Navigate(cpURL); err != nil {
-		return "", 0, fmt.Errorf("hover browser SetNameservers: navigate control_panel: %w", err)
+		return "", 0, fmt.Errorf("hover browser %s: navigate control_panel: %w", operation, err)
 	}
 	_ = page.WaitLoad()
 
@@ -728,13 +845,13 @@ func (b *browserBackend) setNameserversOnce(ctx context.Context, c *Client, doma
 		return m ? m.getAttribute('content') : '';
 	}`)
 	if err != nil {
-		return "", 0, fmt.Errorf("hover browser SetNameservers: eval CSRF: %w", err)
+		return "", 0, fmt.Errorf("hover browser %s: eval CSRF: %w", operation, err)
 	}
 	csrf := obj.Value.String()
 
 	// Build PUT endpoint + payload (same as HTTP backend).
 	putEndpoint := fmt.Sprintf("%s/api/control_panel/domains/domain-%s", base, url.PathEscape(domainName))
-	payload := map[string]any{"field": "nameservers", "value": ns}
+	payload := map[string]any{"field": field, "value": value}
 	headers := map[string]string{}
 	if csrf != "" {
 		headers["X-CSRF-Token"] = csrf
@@ -743,7 +860,7 @@ func (b *browserBackend) setNameserversOnce(ctx context.Context, c *Client, doma
 	rawBody, code, err := browserFetchWithHeaders(ctx, page, "PUT", putEndpoint,
 		"application/json", payload, headers)
 	if err != nil {
-		return "", 0, fmt.Errorf("hover browser SetNameservers %q: fetch: %w", domainName, err)
+		return "", 0, fmt.Errorf("hover browser %s %q: fetch: %w", operation, domainName, err)
 	}
 	return rawBody, code, nil
 }
