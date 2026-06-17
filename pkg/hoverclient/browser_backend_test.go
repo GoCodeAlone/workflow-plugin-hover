@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -727,6 +728,72 @@ func TestBrowserBackend_LoginReusesWarmBrowserProfileSession(t *testing.T) {
 	c.mu.Unlock()
 	if loggedAt.IsZero() {
 		t.Fatal("loggedAt not set after warm profile reuse")
+	}
+}
+
+func TestBrowserBackend_LoginUsesBrowserWarmProbeWhenHTTPProbeMisses(t *testing.T) {
+	opts := newBrowserTestOpts(t)
+
+	var signinHits, authHits, domainsHits atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/dns", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"succeeded":true}`))
+	})
+	mux.HandleFunc("/api/domains", func(w http.ResponseWriter, r *http.Request) {
+		domainsHits.Add(1)
+		if _, err := r.Cookie("__uzma"); err != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"succeeded":false,"error_code":"login"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"succeeded": true, "domains": []map[string]any{}})
+	})
+	mux.HandleFunc("/signin", func(w http.ResponseWriter, r *http.Request) {
+		signinHits.Add(1)
+		http.SetCookie(w, &http.Cookie{Name: "__uzma", Value: "fresh-from-signin", Path: "/"})
+		_, _ = w.Write([]byte(`<html><body>signin</body></html>`))
+	})
+	mux.HandleFunc("/signin/auth.json", func(w http.ResponseWriter, r *http.Request) {
+		authHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"succeeded": true, "status": "completed"})
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	seedBrowserProfileCookie(t, opts, srv.URL, "__uzma", "browser-only-session")
+
+	creds := Credentials{Username: "alice", Password: "pw"}
+	c := newBrowserClient(t, opts, srv.URL, creds)
+	t.Cleanup(func() { _ = c.backend.(interface{ Close() error }).Close() })
+	c.http.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Body:       io.NopCloser(strings.NewReader(`{"succeeded":false,"error_code":"login"}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := c.Login(ctx); err != nil {
+		t.Fatalf("Login with browser warm probe: %v", err)
+	}
+	if gotSignin, gotAuth := signinHits.Load(), authHits.Load(); gotSignin != 0 || gotAuth != 0 {
+		t.Fatalf("browser warm probe should skip credential login; signinHits=%d authHits=%d", gotSignin, gotAuth)
+	}
+	if domainsHits.Load() == 0 {
+		t.Fatal("browser warm probe did not hit /api/domains")
+	}
+	c.mu.Lock()
+	loggedAt := c.loggedAt
+	c.mu.Unlock()
+	if loggedAt.IsZero() {
+		t.Fatal("loggedAt not set after browser warm probe reuse")
 	}
 }
 
