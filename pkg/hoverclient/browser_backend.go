@@ -172,6 +172,12 @@ func (b *browserBackend) login(ctx context.Context, c *Client, allowWarmReuse bo
 			c.mu.Unlock()
 			return nil
 		}
+		if ok, err := b.revalidateBrowserSession(ctx, c); err != nil {
+			return fmt.Errorf("hover browser login: warm browser session probe: %w", err)
+		} else if ok {
+			_ = b.clearSigninCooldown()
+			return nil
+		}
 	}
 	if err := b.checkSigninCooldown(time.Now()); err != nil {
 		return err
