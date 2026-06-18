@@ -32,14 +32,15 @@ func TestLiveSetNameserversNoop(t *testing.T) {
 	if os.Getenv("HOVER_LIVE_TEST") != "1" {
 		t.Skip("set HOVER_LIVE_TEST=1 to run live Hover browser write probe")
 	}
-	domain := strings.TrimSpace(os.Getenv("HOVER_LIVE_NS_DOMAIN"))
-	if domain == "" {
-		t.Skip("set HOVER_LIVE_NS_DOMAIN to the disposable Hover domain to test")
+	targetDomains := splitLiveNameservers(os.Getenv("HOVER_LIVE_NS_DOMAIN"))
+	if len(targetDomains) == 0 {
+		t.Skip("set HOVER_LIVE_NS_DOMAIN to the disposable Hover domain(s) to test")
 	}
 	wantNS := splitLiveNameservers(os.Getenv("HOVER_LIVE_NS_EXPECTED"))
 	if len(wantNS) == 0 {
-		t.Fatal("set HOVER_LIVE_NS_EXPECTED to the current nameservers, comma-separated")
+		t.Fatal("set HOVER_LIVE_NS_EXPECTED to the desired nameservers, comma-separated")
 	}
+	allowChange := strings.EqualFold(strings.TrimSpace(os.Getenv("HOVER_LIVE_NS_ALLOW_CHANGE")), "true")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -52,38 +53,52 @@ func TestLiveSetNameserversNoop(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = c.backend.Close() })
 
-	domains, err := c.ListDomains(ctx)
+	hoverDomains, err := c.ListDomains(ctx)
 	if err != nil {
 		t.Fatalf("ListDomains before write: %v", err)
 	}
-	var found bool
-	for _, d := range domains {
-		if strings.EqualFold(d.Name, domain) {
-			found = true
-			assertNameserversMatch(t, "ListDomains nameservers", d.Nameservers, wantNS)
-			break
+	for _, domain := range targetDomains {
+		domain = strings.TrimSpace(domain)
+		if domain == "" {
+			continue
 		}
-	}
-	if !found {
-		t.Fatalf("domain %q not found in Hover account", domain)
-	}
+		var found bool
+		for _, d := range hoverDomains {
+			if strings.EqualFold(d.Name, domain) {
+				found = true
+				if !allowChange {
+					assertNameserversMatch(t, "ListDomains nameservers", d.Nameservers, wantNS)
+				} else {
+					t.Logf("ListDomains nameservers before write for %s: %s", domain, strings.Join(d.Nameservers, ","))
+				}
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("domain %q not found in Hover account", domain)
+		}
 
-	before, err := c.GetDomainDelegation(ctx, domain)
-	if err != nil {
-		t.Fatalf("GetDomainDelegation before write: %v", err)
-	}
-	assertNameserversMatch(t, "delegation before write", before.Nameservers, wantNS)
+		before, err := c.GetDomainDelegation(ctx, domain)
+		if err != nil {
+			t.Fatalf("GetDomainDelegation before write: %v", err)
+		}
+		if !allowChange {
+			assertNameserversMatch(t, "delegation before write", before.Nameservers, wantNS)
+		} else {
+			t.Logf("delegation before write for %s: %s", domain, strings.Join(before.Nameservers, ","))
+		}
 
-	if err := c.SetNameservers(ctx, domain, wantNS); err != nil {
-		t.Fatalf("SetNameservers no-op write: %v", err)
-	}
+		if err := c.SetNameservers(ctx, domain, wantNS); err != nil {
+			t.Fatalf("SetNameservers write for %s: %v", domain, err)
+		}
 
-	after, err := c.GetDomainDelegation(ctx, domain)
-	if err != nil {
-		t.Fatalf("GetDomainDelegation after write: %v", err)
+		after, err := c.GetDomainDelegation(ctx, domain)
+		if err != nil {
+			t.Fatalf("GetDomainDelegation after write: %v", err)
+		}
+		assertNameserversMatch(t, "delegation after write", after.Nameservers, wantNS)
+		t.Logf("SetNameservers write succeeded for %s with %s", domain, strings.Join(wantNS, ","))
 	}
-	assertNameserversMatch(t, "delegation after write", after.Nameservers, wantNS)
-	t.Logf("SetNameservers no-op write succeeded for %s with %s", domain, strings.Join(wantNS, ","))
 }
 
 func liveCredentialsFromEnv(t *testing.T) Credentials {
