@@ -688,7 +688,13 @@ func (c *Client) getDomainDelegationHTTP(ctx context.Context, domainName string)
 // resource). Future: cache CSRF at session granularity if
 // mixed-resource throughput becomes a concern.
 func (c *Client) SetNameservers(ctx context.Context, domainName string, ns []string) error {
-	return c.backend.SetNameservers(ctx, c, domainName, ns)
+	if err := c.backend.SetNameservers(ctx, c, domainName, ns); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	delete(c.domainNS, domainName)
+	c.mu.Unlock()
+	return nil
 }
 
 // SetTransferLock updates Hover's registrar transfer-lock setting.

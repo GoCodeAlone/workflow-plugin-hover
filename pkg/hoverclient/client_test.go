@@ -560,6 +560,40 @@ func TestSetNameservers_PUTShape(t *testing.T) {
 	}
 }
 
+func TestSetNameservers_InvalidatesDelegationCache(t *testing.T) {
+	var getDomainHits int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/control_panel/domain/example.com", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<meta name="csrf-token" content="csrf">`))
+	})
+	mux.HandleFunc("/api/control_panel/domains/domain-example.com", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"succeeded":true}`))
+	})
+	mux.HandleFunc("/api/domains/example.com", func(w http.ResponseWriter, _ *http.Request) {
+		getDomainHits++
+		_, _ = w.Write([]byte(`{"succeeded":true,"domain":{"id":"domain-example.com","domain_name":"example.com","nameservers":["new1.example.com","new2.example.com"]}}`))
+	})
+	c, srv := newStubClient(t, mux.ServeHTTP)
+	defer srv.Close()
+	c.loggedAt = time.Now()
+	c.domainNS = map[string][]string{}
+	c.domainNS["example.com"] = []string{"old1.example.com", "old2.example.com"}
+
+	if err := c.SetNameservers(context.Background(), "example.com", []string{"new1.example.com", "new2.example.com"}); err != nil {
+		t.Fatalf("SetNameservers: %v", err)
+	}
+	delegation, err := c.GetDomainDelegation(context.Background(), "example.com")
+	if err != nil {
+		t.Fatalf("GetDomainDelegation: %v", err)
+	}
+	if getDomainHits != 1 {
+		t.Fatalf("per-domain GET hits = %d, want 1 after cache invalidation", getDomainHits)
+	}
+	if got := strings.Join(delegation.Nameservers, ","); got != "new1.example.com,new2.example.com" {
+		t.Fatalf("delegation nameservers = %s", got)
+	}
+}
+
 func TestSetNameservers_Non2xxPUT(t *testing.T) {
 	c, srv := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/control_panel/domain/") {
